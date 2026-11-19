@@ -197,7 +197,7 @@ export function FriendsView({
         <div>
           <h1 className="text-2xl font-extrabold text-stone-900 dark:text-stone-100">Invite Friends</h1>
           <p className="text-sm text-stone-500 dark:text-stone-400">
-            Earn +{REFERRER_SIGNUP_BONUS_COINS} coins per referral, +{REFERRED_WELCOME_BONUS_COINS} bonus for your friend &amp; {depositPercentLabel} deposit share
+            Earn +{REFERRER_SIGNUP_BONUS_COINS} coins on friend's 1st hen, +{REFERRED_WELCOME_BONUS_COINS} bonus for friend &amp; {depositPercentLabel} lifetime deposit share
           </p>
         </div>
         {nextUnclaimedCrate && (
@@ -269,7 +269,7 @@ export function FriendsView({
         <div>
           <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100">Referral rewards</h2>
           <p className="text-xs text-stone-500 dark:text-stone-400">
-            Get +{REFERRER_SIGNUP_BONUS_COINS} coins immediately when a friend joins via your link, your friend receives +{REFERRED_WELCOME_BONUS_COINS} welcome coins, and you earn {depositPercentLabel} coins on deposits + {eggPercentLabel} lifetime eggs.
+            Referral links apply immediately (+{REFERRED_WELCOME_BONUS_COINS} welcome coins for your friend). You earn +{REFERRER_SIGNUP_BONUS_COINS} coins when they buy their 1st hen, plus {depositPercentLabel} coins on every deposit for life &amp; {eggPercentLabel} eggs.
           </p>
         </div>
 
@@ -280,7 +280,7 @@ export function FriendsView({
               <span>+{REFERRER_SIGNUP_BONUS_COINS}</span>
             </div>
             <div className="text-[11px] font-semibold text-stone-600 dark:text-stone-300 mt-0.5 leading-tight">
-              You earn instantly
+              On friend's 1st hen
             </div>
           </div>
           <div className="clay-inset clay-hover-lift !rounded-2xl p-2.5 text-center">
@@ -298,13 +298,13 @@ export function FriendsView({
               <span>{depositPercentLabel}</span>
             </div>
             <div className="text-[11px] font-semibold text-stone-600 dark:text-stone-300 mt-0.5 leading-tight">
-              Deposit &amp; {eggPercentLabel} eggs
+              Lifetime deposit &amp; {eggPercentLabel} eggs
             </div>
           </div>
         </div>
 
         <div className="clay-inset !rounded-2xl px-3.5 py-2.5 text-[11px] font-semibold text-stone-600 dark:text-stone-300 text-center">
-          Instant Telegram Bot &amp; in-app alerts notify you the moment a referral joins (+{REFERRER_SIGNUP_BONUS_COINS} coins) or deposits ({depositPercentLabel} share) — plus unlock Bonus Crates at 3, 10 &amp; 25 friends!
+          Instant Telegram Bot &amp; in-app alerts notify you when your friend unlocks +{REFERRER_SIGNUP_BONUS_COINS} coins (1st hen) or makes any deposit ({depositPercentLabel} lifetime share) — plus Bonus Crates at 3, 10 &amp; 25 friends!
         </div>
 
         <div className="space-y-1.5">
@@ -567,8 +567,8 @@ export function FriendsView({
         {invitedFriends.length === 0 ? (
           <div className="clay-inset p-5 text-center text-xs text-stone-500 dark:text-stone-400">
             No invited friends yet. Share your invite link to earn{' '}
-            <span className="font-bold text-emerald-700 dark:text-emerald-400">+{REFERRER_SIGNUP_BONUS_COINS} coins</span> instantly and a{' '}
-            <span className="font-bold text-amber-700 dark:text-amber-400">{depositPercentLabel} deposit commission share</span> from every friend!
+            <span className="font-bold text-emerald-700 dark:text-emerald-400">+{REFERRER_SIGNUP_BONUS_COINS} coins</span> when they buy their 1st hen and a{' '}
+            <span className="font-bold text-amber-700 dark:text-amber-400">{depositPercentLabel} lifetime deposit commission</span> from every friend!
           </div>
         ) : (
           <ul aria-label="Invited Friends" className="divide-y divide-stone-100 dark:divide-stone-800">

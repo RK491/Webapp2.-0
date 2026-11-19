@@ -306,19 +306,21 @@ function buildDirectPrivateMiniAppButton(
   botUsername: string,
   startParam?: string,
 ): { text: string; web_app?: { url: string }; url?: string } {
+  const cleanParam = String(startParam || '').trim();
   if (cachedBotMenuWebAppUrl) {
     try {
       const target = new URL(cachedBotMenuWebAppUrl);
-      const cleanParam = String(startParam || '').trim();
       if (cleanParam) {
         target.searchParams.set('startapp', cleanParam);
+      } else {
+        target.searchParams.delete('startapp');
       }
       return { text, web_app: { url: target.toString() } };
     } catch {
       // Fallback to t.me link
     }
   }
-  return { text, url: buildTelegramMiniAppLink(botUsername, startParam) };
+  return { text, url: buildTelegramMiniAppLink(botUsername, cleanParam || undefined) };
 }
 const TONCENTER_API_KEY = (process.env.TONCENTER_API_KEY || '').trim();
 const ADMIN_TELEGRAM_IDS = (process.env.ADMIN_TELEGRAM_IDS || '')
@@ -1114,8 +1116,8 @@ function persistMaintenanceConfigToDisk(cfg: MaintenanceConfig): void {
   }
 }
 
-const MAINTENANCE_PROFILE_DOC_ID = '__maintenance_cfg__';
-const SYSTEM_RESET_PROFILE_DOC_ID = '__system_reset__';
+const MAINTENANCE_PROFILE_DOC_ID = 'sys_maintenance_cfg';
+const SYSTEM_RESET_PROFILE_DOC_ID = 'sys_system_reset';
 
 function encodeMaintenanceMirrorTokens(cfg: MaintenanceConfig): string[] {
   const compact = JSON.stringify({
@@ -1788,6 +1790,7 @@ async function applyReferralInServerDb(params: {
 }): Promise<{
   ok: boolean;
   applied: boolean;
+  activated?: boolean;
   alreadyLinked?: boolean;
   reason?: string;
   referrerUid?: string;
@@ -1915,6 +1918,7 @@ async function applyReferralInServerDb(params: {
           getDocs(query(collection(serverDb, 'leaderboard'), limit(50))),
         ]);
         for (const docSnap of [...playersSnap.docs, ...lbSnap.docs]) {
+          if (docSnap.id.startsWith('sys_') || docSnap.id.startsWith('__')) continue;
           const data = docSnap.data();
           const hLow = String(data?.handle || '').trim().replace(/^@+/, '').toLowerCase();
           const cLow = String(data?.referralCode || '').trim().toLowerCase();
@@ -1943,11 +1947,14 @@ async function applyReferralInServerDb(params: {
     const nowMs = Date.now();
     const rewardCoins = BONUS_PER_REFERRAL;
     let alreadyLinked = false;
+    let existingReferralActivated = false;
+    let existingReferrerUid = '';
+    let activatedOnLink = false;
     let safeReferredName = String(params.displayName || '').trim().slice(0, 60) || 'Farmer';
     let safeReferredHandle = formatReferralHandle(String(params.handle || ''), referredUid).slice(0, 40);
     let nextReferredCoins = 0;
-    let referrerTotalReferrals = 1;
-    let referrerTotalCoinsEarned = rewardCoins;
+    let referrerTotalReferrals = 0;
+    let referrerTotalCoinsEarned = 0;
 
     await runTransaction(serverDb, async (tx) => {
       const [referredSnap, referredLbSnap, referrerSnap, referrerLbSnap, existingRefSnap] =
@@ -1968,8 +1975,24 @@ async function applyReferralInServerDb(params: {
         (referredSnap.exists() && String(referredSnap.data()?.referredBy || '').trim() !== '')
       ) {
         alreadyLinked = true;
+        existingReferrerUid = String(
+          referredSnap.exists() ? referredSnap.data()?.referredBy || referrerUid : referrerUid,
+        ).trim();
+        existingReferralActivated = referredSnap.exists()
+          ? Boolean(referredSnap.data()?.referralActivated)
+          : false;
+        nextReferredCoins = referredSnap.exists() ? Number(referredSnap.data()?.coins ?? 0) : 0;
         return;
       }
+
+      const existingChickenCount = referredSnap.exists()
+        ? Number(referredSnap.data().leghornCount ?? 0) +
+          Number(referredSnap.data().rhodeCount ?? 0) +
+          Number(referredSnap.data().orpingtonCount ?? 0) +
+          Number(referredSnap.data().australorpCount ?? 0)
+        : 0;
+      const hasOwnedChicken = existingChickenCount > 0;
+      activatedOnLink = hasOwnedChicken;
 
       if (referredSnap.exists()) {
         const rd = referredSnap.data();
@@ -1984,7 +2007,7 @@ async function applyReferralInServerDb(params: {
           referredPlayerRef,
           toServerFirestorePlayerUpdatePayload(rd, referredUid, {
             referredBy: referrerUid,
-            referralActivated: true,
+            referralActivated: hasOwnedChicken,
             coins: nextReferredCoins,
           }),
         );
@@ -2002,7 +2025,7 @@ async function applyReferralInServerDb(params: {
           toServerFirestorePlayerCreatePayload({
             ...seeded,
             referredBy: referrerUid,
-            referralActivated: true,
+            referralActivated: hasOwnedChicken,
             coins: nextReferredCoins,
           }),
         );
@@ -2024,13 +2047,15 @@ async function applyReferralInServerDb(params: {
         }
       }
 
+      // Link immediately with status 'pending'; +150 coin referrer bonus unlocks on 1st hen (miner) purchase.
+      // If user already owns a hen (e.g. delayed recovery), activate and award immediately.
       tx.set(referralDocRef, {
         referrerUid,
         referredUid,
         referredName: safeReferredName,
         referredHandle: safeReferredHandle,
-        status: 'active',
-        coinsEarned: rewardCoins,
+        status: hasOwnedChicken ? 'active' : 'pending',
+        coinsEarned: hasOwnedChicken ? rewardCoins : 0,
         toppedUpUsd: 0,
         createdAtMs: nowMs,
         createdAt: serverTimestamp(),
@@ -2048,177 +2073,121 @@ async function applyReferralInServerDb(params: {
         createdAt: serverTimestamp(),
       });
 
-      const rp = referrerSnap.data();
-      const nextReferrerCoins = Math.max(-100_000_000, (Number(rp.coins ?? 0) || 0) + rewardCoins);
-      const nextReferrerCount = Math.max(0, Math.floor(Number(rp.referralCount ?? 0))) + 1;
-      const nextReferrerCoinsEarned = Math.max(0, Number(rp.referralCoinsEarned ?? 0)) + rewardCoins;
-      referrerTotalReferrals = nextReferrerCount;
-      referrerTotalCoinsEarned = nextReferrerCoinsEarned;
-      const referrerFakeProfile = {
-        leghornCount: Number(rp.leghornCount ?? 0),
-        rhodeCount: Number(rp.rhodeCount ?? 0),
-        orpingtonCount: Number(rp.orpingtonCount ?? 0),
-        australorpCount: Number(rp.australorpCount ?? 0),
-        totalEggsCollected: Number(rp.totalEggsCollected ?? 0),
-        referralCount: nextReferrerCount,
-      };
-      const nextBuyerPoints = Math.max(0, calculateBuyerPoints(referrerFakeProfile as Parameters<typeof calculateBuyerPoints>[0]));
-      const nextChickensCount = Math.max(0, calculateTotalChickens(referrerFakeProfile as Parameters<typeof calculateTotalChickens>[0]));
-
-      tx.update(
-        referrerPlayerRef,
-        toServerFirestorePlayerUpdatePayload(rp, referrerUid, {
-          coins: nextReferrerCoins,
+      if (hasOwnedChicken) {
+        const rp = referrerSnap.data();
+        const nextReferrerCoins = Math.max(-100_000_000, (Number(rp.coins ?? 0) || 0) + rewardCoins);
+        const nextReferrerCount = Math.max(0, Math.floor(Number(rp.referralCount ?? 0))) + 1;
+        const nextReferrerCoinsEarned = Math.max(0, Number(rp.referralCoinsEarned ?? 0)) + rewardCoins;
+        referrerTotalReferrals = nextReferrerCount;
+        referrerTotalCoinsEarned = nextReferrerCoinsEarned;
+        const referrerFakeProfile = {
+          leghornCount: Number(rp.leghornCount ?? 0),
+          rhodeCount: Number(rp.rhodeCount ?? 0),
+          orpingtonCount: Number(rp.orpingtonCount ?? 0),
+          australorpCount: Number(rp.australorpCount ?? 0),
+          totalEggsCollected: Number(rp.totalEggsCollected ?? 0),
           referralCount: nextReferrerCount,
-          referralCoinsEarned: nextReferrerCoinsEarned,
-        }),
-      );
+        };
+        const nextBuyerPoints = Math.max(0, calculateBuyerPoints(referrerFakeProfile as Parameters<typeof calculateBuyerPoints>[0]));
+        const nextChickensCount = Math.max(0, calculateTotalChickens(referrerFakeProfile as Parameters<typeof calculateTotalChickens>[0]));
 
-      if (referrerLbSnap.exists()) {
         tx.update(
-          referrerLbRef,
-          toServerFirestoreLeaderboardUpdatePayload(referrerLbSnap.data(), rp, referrerUid, {
-            inviterCount: nextReferrerCount,
-            buyerPoints: nextBuyerPoints,
-            chickensCount: nextChickensCount,
+          referrerPlayerRef,
+          toServerFirestorePlayerUpdatePayload(rp, referrerUid, {
+            coins: nextReferrerCoins,
+            referralCount: nextReferrerCount,
+            referralCoinsEarned: nextReferrerCoinsEarned,
           }),
         );
-      } else {
-        tx.set(referrerLbRef, {
-          uid: referrerUid,
-          displayName: String(rp.displayName || referrerName || 'Farmer').trim().slice(0, 60) || 'Farmer',
-          handle: formatReferralHandle(String(rp.handle || ''), referrerUid).slice(0, 40) || '@farmer',
-          photoUrl: String(rp.photoUrl || '').slice(0, 512),
-          avatarColor: String(rp.avatarColor || '#EF4444').trim().length >= 4 ? String(rp.avatarColor).slice(0, 20) : '#EF4444',
-          referralCode: String(rp.referralCode || referrerUid).slice(0, 32) || referrerUid.slice(0, 32),
-          buyerPoints: nextBuyerPoints,
-          inviterCount: nextReferrerCount,
-          eggs: Math.max(0, Number(rp.eggs ?? 0)),
-          totalEggsCollected: Math.max(0, Number(rp.totalEggsCollected ?? 0)),
-          chickensCount: nextChickensCount,
-          updatedAt: serverTimestamp(),
+
+        if (referrerLbSnap.exists()) {
+          tx.update(
+            referrerLbRef,
+            toServerFirestoreLeaderboardUpdatePayload(referrerLbSnap.data(), rp, referrerUid, {
+              inviterCount: nextReferrerCount,
+              buyerPoints: nextBuyerPoints,
+              chickensCount: nextChickensCount,
+            }),
+          );
+        } else {
+          tx.set(referrerLbRef, {
+            uid: referrerUid,
+            displayName: String(rp.displayName || referrerName || 'Farmer').trim().slice(0, 60) || 'Farmer',
+            handle: formatReferralHandle(String(rp.handle || ''), referrerUid).slice(0, 40) || '@farmer',
+            photoUrl: String(rp.photoUrl || '').slice(0, 512),
+            avatarColor: String(rp.avatarColor || '#EF4444').trim().length >= 4 ? String(rp.avatarColor).slice(0, 20) : '#EF4444',
+            referralCode: String(rp.referralCode || referrerUid).slice(0, 32) || referrerUid.slice(0, 32),
+            buyerPoints: nextBuyerPoints,
+            inviterCount: nextReferrerCount,
+            eggs: Math.max(0, Number(rp.eggs ?? 0)),
+            totalEggsCollected: Math.max(0, Number(rp.totalEggsCollected ?? 0)),
+            chickensCount: nextChickensCount,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        const refTxId = `tx_ref_earned_${referredUid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16)}_${nowMs}`.slice(0, 64);
+        tx.set(doc(serverDb, 'players', referrerUid, 'transactions', refTxId), {
+          userId: referrerUid,
+          type: 'referral',
+          title: `Referral reward (+${rewardCoins} coins): ${safeReferredName}`.slice(0, 80),
+          amount: rewardCoins,
+          currency: 'coins',
+          usdValue: coinsToUsd(rewardCoins),
+          status: 'completed',
+          createdAtMs: nowMs,
+          createdAt: serverTimestamp(),
         });
       }
-
-      const refTxId = `tx_ref_earned_${referredUid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16)}_${nowMs}`.slice(0, 64);
-      tx.set(doc(serverDb, 'players', referrerUid, 'transactions', refTxId), {
-        userId: referrerUid,
-        type: 'referral',
-        title: `Referral reward (+${rewardCoins} coins): ${safeReferredName}`.slice(0, 80),
-        amount: rewardCoins,
-        currency: 'coins',
-        usdValue: coinsToUsd(rewardCoins),
-        status: 'completed',
-        createdAtMs: nowMs,
-        createdAt: serverTimestamp(),
-      });
     });
 
     if (alreadyLinked) {
-      saveReferral(referredUid, referrerUid);
-      return { ok: true, applied: false, alreadyLinked: true, reason: 'already_linked', referrerUid };
+      const resolvedRef = existingReferrerUid || referrerUid;
+      saveReferral(referredUid, resolvedRef);
+      return {
+        ok: true,
+        applied: false,
+        activated: existingReferralActivated,
+        alreadyLinked: true,
+        reason: 'already_linked',
+        referrerUid: resolvedRef,
+        nextReferredCoins,
+      };
     }
 
     saveReferral(referredUid, referrerUid);
 
     let botDmSent = false;
     let botDmReason: string | undefined;
-    const numericReferrerId = extractTelegramNumericUserId(referrerUid);
-    const activeBotToken = getTelegramBotToken();
-    if (numericReferrerId && activeBotToken) {
-      const dedupKey = `referral_joined:${referrerUid}:${referredUid}`;
-      const messageText = buildReferralBotNotificationMessage({
-        event: 'referral_joined',
+    if (activatedOnLink) {
+      const dmResult = await sendReferrerJoinedBotDm({
+        referrerUid,
+        referredUid,
         referredName: safeReferredName,
         referredHandle: safeReferredHandle,
         rewardCoins,
         totalReferrals: referrerTotalReferrals,
         totalReferralCoins: referrerTotalCoinsEarned,
       });
-      const botUsername =
-        runtimeBotConfig?.botUsername ||
-        TELEGRAM_BOT_USERNAME_ENV ||
-        cachedBotUsername ||
-        DEFAULT_TELEGRAM_BOT_USERNAME;
-      const friendsButton = buildDirectPrivateMiniAppButton(
-        '👥 View Friends & Rewards',
-        botUsername,
-        'friends',
-      );
-      try {
-        let tgRes = await fetch(
-          `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: numericReferrerId,
-              text: messageText,
-              parse_mode: 'HTML',
-              reply_markup: {
-                inline_keyboard: [[friendsButton]],
-              },
-            }),
-            signal: AbortSignal.timeout(7000),
-          },
-        );
-        let tgData = (await tgRes.json()) as {
-          ok?: boolean;
-          error_code?: number;
-          description?: string;
-        };
-        if (!tgData.ok && tgData.error_code === 400 && String(tgData.description || '').toLowerCase().includes('parse')) {
-          tgRes = await fetch(
-            `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                chat_id: numericReferrerId,
-                text: messageText.replace(/<\/?[^>]+>/g, ''),
-              }),
-              signal: AbortSignal.timeout(7000),
-            },
-          );
-          tgData = (await tgRes.json()) as typeof tgData;
-        }
-        botDmSent = Boolean(tgData.ok);
-        if (tgData.ok) {
-          referralNotifyDedup.set(dedupKey, Date.now());
-          void upsertBotSubscriber({
-            chatId: numericReferrerId,
-            source: 'miniapp',
-            isBotBlocked: false,
-          });
-        } else {
-          botDmReason = redactBotToken(tgData.description || 'Telegram API error');
-          if (tgData.error_code === 403) {
-            void markBotSubscriberBlocked(numericReferrerId, true);
-          }
-        }
-      } catch (err) {
-        botDmReason = redactBotToken(err instanceof Error ? err.message : 'Telegram request failed');
-      }
-    } else if (!activeBotToken) {
-      botDmReason = 'TELEGRAM_BOT_TOKEN not configured on server';
-    } else {
-      botDmReason = 'Referrer has no numeric Telegram chat ID';
+      botDmSent = dmResult.sent;
+      botDmReason = dmResult.reason;
     }
 
     recordServerLog(
-      botDmSent ? 'info' : 'warn',
+      'info',
       'referral_apply',
-      `Referral applied: ${referredUid} -> ${referrerUid} (+${rewardCoins}c)`,
-      `botDmSent=${botDmSent}${botDmReason ? ` (${botDmReason})` : ''}`,
+      `Referral linked: ${referredUid} -> ${referrerUid} (${activatedOnLink ? `activated +${rewardCoins}c` : 'pending 1st hen'})`,
+      activatedOnLink ? `botDmSent=${botDmSent}${botDmReason ? ` (${botDmReason})` : ''}` : undefined,
     );
 
     return {
       ok: true,
       applied: true,
+      activated: activatedOnLink,
       alreadyLinked: false,
       referrerUid,
       referrerName,
-      coinsRewarded: rewardCoins,
+      coinsRewarded: activatedOnLink ? rewardCoins : 0,
       referredCoinsAwarded: REFERRED_WELCOME_BONUS_COINS,
       referredBonusCoins: REFERRED_WELCOME_BONUS_COINS,
       nextReferredCoins,
@@ -2241,6 +2210,350 @@ async function applyReferralInServerDb(params: {
       reason: 'transaction_failed',
       statusCode: 500,
     };
+  }
+}
+
+async function sendReferrerJoinedBotDm(params: {
+  referrerUid: string;
+  referredUid: string;
+  referredName: string;
+  referredHandle: string;
+  rewardCoins: number;
+  totalReferrals?: number;
+  totalReferralCoins?: number;
+}): Promise<{ sent: boolean; reason?: string }> {
+  const numericReferrerId = extractTelegramNumericUserId(params.referrerUid);
+  const activeBotToken = getTelegramBotToken();
+  if (!activeBotToken) {
+    return { sent: false, reason: 'TELEGRAM_BOT_TOKEN not configured on server' };
+  }
+  if (!numericReferrerId) {
+    return { sent: false, reason: 'Referrer has no numeric Telegram chat ID' };
+  }
+
+  const dedupKey = `referral_joined:${params.referrerUid}:${params.referredUid}`;
+  const prevSentAt = referralNotifyDedup.get(dedupKey);
+  if (prevSentAt && Date.now() - prevSentAt < 60_000) {
+    return { sent: false, reason: 'Duplicate notification suppressed' };
+  }
+
+  const messageText = buildReferralBotNotificationMessage({
+    event: 'referral_joined',
+    referredName: params.referredName,
+    referredHandle: params.referredHandle,
+    rewardCoins: params.rewardCoins,
+    totalReferrals: params.totalReferrals,
+    totalReferralCoins: params.totalReferralCoins,
+  });
+  const botUsername = getFastBotUsername();
+  const friendsButton = buildDirectPrivateMiniAppButton(
+    '👥 View Friends & Rewards',
+    botUsername,
+    'friends',
+  );
+
+  try {
+    let tgRes = await fetch(
+      `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: numericReferrerId,
+          text: messageText,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[friendsButton]],
+          },
+        }),
+        signal: AbortSignal.timeout(7000),
+      },
+    );
+    let tgData = (await tgRes.json()) as {
+      ok?: boolean;
+      error_code?: number;
+      description?: string;
+    };
+    if (!tgData.ok && tgData.error_code === 400 && String(tgData.description || '').toLowerCase().includes('parse')) {
+      tgRes = await fetch(
+        `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: numericReferrerId,
+            text: messageText.replace(/<\/?[^>]+>/g, ''),
+          }),
+          signal: AbortSignal.timeout(7000),
+        },
+      );
+      tgData = (await tgRes.json()) as typeof tgData;
+    }
+    if (tgData.ok) {
+      if (referralNotifyDedup.size > 1000) referralNotifyDedup.clear();
+      referralNotifyDedup.set(dedupKey, Date.now());
+      void upsertBotSubscriber({
+        chatId: numericReferrerId,
+        source: 'miniapp',
+        isBotBlocked: false,
+      });
+      return { sent: true };
+    }
+    if (tgData.error_code === 403) {
+      void markBotSubscriberBlocked(numericReferrerId, true);
+    }
+    return {
+      sent: false,
+      reason: redactBotToken(tgData.description || 'Telegram API error'),
+    };
+  } catch (err) {
+    return {
+      sent: false,
+      reason: redactBotToken(err instanceof Error ? err.message : 'Telegram request failed'),
+    };
+  }
+}
+
+async function activateReferralInServerDb(params: {
+  referredUid: string;
+  referrerUidHint?: string;
+  referredName?: string;
+  referredHandle?: string;
+}): Promise<{
+  ok: boolean;
+  activated: boolean;
+  alreadyActivated?: boolean;
+  referrerUid?: string;
+  coinsRewarded: number;
+  botDmSent: boolean;
+  botDmReason?: string;
+}> {
+  if (!serverDb || !isValidSafeId(params.referredUid)) {
+    return { ok: false, activated: false, coinsRewarded: 0, botDmSent: false };
+  }
+
+  const referredUid = params.referredUid.trim();
+  const referredPlayerRef = doc(serverDb, 'players', referredUid);
+  const referredLbRef = doc(serverDb, 'leaderboard', referredUid);
+  const rewardCoins = BONUS_PER_REFERRAL;
+  const nowMs = Date.now();
+
+  try {
+    const preSnap = await getFreshDoc(referredPlayerRef);
+    const mergedDisk = getMergedReferralsForUser(referredUid);
+    const preReferrerUid = String(
+      (preSnap.exists() ? preSnap.data()?.referredBy : '') ||
+        params.referrerUidHint ||
+        mergedDisk.referrer ||
+        '',
+    ).trim();
+
+    if (!preReferrerUid || !isValidSafeId(preReferrerUid) || preReferrerUid === referredUid) {
+      return { ok: true, activated: false, coinsRewarded: 0, botDmSent: false };
+    }
+
+    const referrerPlayerRef = doc(serverDb, 'players', preReferrerUid);
+    const referrerLbRef = doc(serverDb, 'leaderboard', preReferrerUid);
+    const refDocRef = doc(serverDb, 'players', preReferrerUid, 'referrals', referredUid);
+
+    let activatedNow = false;
+    let alreadyActivated = false;
+    let totalReferrals = 0;
+    let totalReferralCoins = 0;
+    let safeReferredName = String(params.referredName || '').trim().slice(0, 60) || 'Farmer';
+    let safeReferredHandle = formatReferralHandle(String(params.referredHandle || ''), referredUid).slice(0, 40);
+
+    await runTransaction(serverDb, async (tx) => {
+      const [referredSnap, referredLbSnap, referrerSnap, referrerLbSnap, refSnap] = await Promise.all([
+        tx.get(referredPlayerRef),
+        tx.get(referredLbRef),
+        tx.get(referrerPlayerRef),
+        tx.get(referrerLbRef),
+        tx.get(refDocRef),
+      ]);
+
+      if (!referrerSnap.exists()) return;
+
+      const rd = referredSnap.exists() ? referredSnap.data() : undefined;
+      if (rd) {
+        safeReferredName =
+          String(rd.displayName || params.referredName || 'Farmer').trim().slice(0, 60) || 'Farmer';
+        safeReferredHandle = formatReferralHandle(
+          String(rd.handle || params.referredHandle || ''),
+          referredUid,
+        ).slice(0, 40);
+      }
+
+      const rp = referrerSnap.data();
+      totalReferrals = Math.max(0, Math.floor(Number(rp.referralCount ?? 0)));
+      totalReferralCoins = Math.max(0, Number(rp.referralCoinsEarned ?? 0));
+
+      const refStatus = refSnap.exists() ? String(refSnap.data()?.status || '') : '';
+      if (refSnap.exists() && refStatus === 'active') {
+        alreadyActivated = true;
+        if (rd && !rd.referralActivated) {
+          tx.update(
+            referredPlayerRef,
+            toServerFirestorePlayerUpdatePayload(rd, referredUid, {
+              referredBy: String(rd.referredBy || preReferrerUid),
+              referralActivated: true,
+            }),
+          );
+        }
+        return;
+      }
+
+      const ownedChickens = rd
+        ? Number(rd.leghornCount ?? 0) +
+          Number(rd.rhodeCount ?? 0) +
+          Number(rd.orpingtonCount ?? 0) +
+          Number(rd.australorpCount ?? 0)
+        : 0;
+      if (rd && ownedChickens <= 0) {
+        return;
+      }
+
+      activatedNow = true;
+      const nextReferrerCoins = Math.max(-100_000_000, (Number(rp.coins ?? 0) || 0) + rewardCoins);
+      const nextReferrerCount = totalReferrals + 1;
+      const nextReferrerCoinsEarned = totalReferralCoins + rewardCoins;
+      totalReferrals = nextReferrerCount;
+      totalReferralCoins = nextReferrerCoinsEarned;
+
+      if (rd && (!rd.referralActivated || !rd.referredBy)) {
+        tx.update(
+          referredPlayerRef,
+          toServerFirestorePlayerUpdatePayload(rd, referredUid, {
+            referredBy: String(rd.referredBy || preReferrerUid),
+            referralActivated: true,
+          }),
+        );
+        if (referredLbSnap.exists()) {
+          const fakeRef = {
+            leghornCount: Number(rd.leghornCount ?? 0),
+            rhodeCount: Number(rd.rhodeCount ?? 0),
+            orpingtonCount: Number(rd.orpingtonCount ?? 0),
+            australorpCount: Number(rd.australorpCount ?? 0),
+            totalEggsCollected: Number(rd.totalEggsCollected ?? 0),
+            referralCount: Number(rd.referralCount ?? 0),
+          };
+          tx.update(
+            referredLbRef,
+            toServerFirestoreLeaderboardUpdatePayload(referredLbSnap.data(), rd, referredUid, {
+              inviterCount: Math.max(0, Math.floor(Number(rd.referralCount ?? 0))),
+              buyerPoints: Math.max(0, calculateBuyerPoints(fakeRef as Parameters<typeof calculateBuyerPoints>[0])),
+              chickensCount: Math.max(0, calculateTotalChickens(fakeRef as Parameters<typeof calculateTotalChickens>[0])),
+            }),
+          );
+        }
+      }
+
+      if (refSnap.exists()) {
+        tx.update(refDocRef, {
+          status: 'active',
+          coinsEarned: Number(refSnap.data()?.coinsEarned ?? 0) + rewardCoins,
+        });
+      } else {
+        tx.set(refDocRef, {
+          referrerUid: preReferrerUid,
+          referredUid,
+          referredName: safeReferredName,
+          referredHandle: safeReferredHandle,
+          status: 'active',
+          coinsEarned: rewardCoins,
+          toppedUpUsd: 0,
+          createdAtMs: nowMs,
+          createdAt: serverTimestamp(),
+        });
+      }
+
+      const referrerFakeProfile = {
+        leghornCount: Number(rp.leghornCount ?? 0),
+        rhodeCount: Number(rp.rhodeCount ?? 0),
+        orpingtonCount: Number(rp.orpingtonCount ?? 0),
+        australorpCount: Number(rp.australorpCount ?? 0),
+        totalEggsCollected: Number(rp.totalEggsCollected ?? 0),
+        referralCount: nextReferrerCount,
+      };
+      const nextBuyerPoints = Math.max(0, calculateBuyerPoints(referrerFakeProfile as Parameters<typeof calculateBuyerPoints>[0]));
+      const nextChickensCount = Math.max(0, calculateTotalChickens(referrerFakeProfile as Parameters<typeof calculateTotalChickens>[0]));
+
+      tx.update(
+        referrerPlayerRef,
+        toServerFirestorePlayerUpdatePayload(rp, preReferrerUid, {
+          coins: nextReferrerCoins,
+          referralCount: nextReferrerCount,
+          referralCoinsEarned: nextReferrerCoinsEarned,
+        }),
+      );
+
+      if (referrerLbSnap.exists()) {
+        tx.update(
+          referrerLbRef,
+          toServerFirestoreLeaderboardUpdatePayload(referrerLbSnap.data(), rp, preReferrerUid, {
+            inviterCount: nextReferrerCount,
+            buyerPoints: nextBuyerPoints,
+            chickensCount: nextChickensCount,
+          }),
+        );
+      } else {
+        tx.set(referrerLbRef, {
+          uid: preReferrerUid,
+          displayName: String(rp.displayName || 'Farmer').trim().slice(0, 60) || 'Farmer',
+          handle: formatReferralHandle(String(rp.handle || ''), preReferrerUid).slice(0, 40) || '@farmer',
+          photoUrl: String(rp.photoUrl || '').slice(0, 512),
+          avatarColor: String(rp.avatarColor || '#EF4444').trim().length >= 4 ? String(rp.avatarColor).slice(0, 20) : '#EF4444',
+          referralCode: String(rp.referralCode || preReferrerUid).slice(0, 32) || preReferrerUid.slice(0, 32),
+          buyerPoints: nextBuyerPoints,
+          inviterCount: nextReferrerCount,
+          eggs: Math.max(0, Number(rp.eggs ?? 0)),
+          totalEggsCollected: Math.max(0, Number(rp.totalEggsCollected ?? 0)),
+          chickensCount: nextChickensCount,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      const refTxId = `tx_ref_earned_${referredUid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16)}_${nowMs}`.slice(0, 64);
+      tx.set(doc(serverDb, 'players', preReferrerUid, 'transactions', refTxId), {
+        userId: preReferrerUid,
+        type: 'referral',
+        title: `Referral reward (+${rewardCoins} coins): ${safeReferredName}`.slice(0, 80),
+        amount: rewardCoins,
+        currency: 'coins',
+        usdValue: coinsToUsd(rewardCoins),
+        status: 'completed',
+        createdAtMs: nowMs,
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    let botDmSent = false;
+    let botDmReason: string | undefined;
+    if (activatedNow || alreadyActivated) {
+      const dm = await sendReferrerJoinedBotDm({
+        referrerUid: preReferrerUid,
+        referredUid,
+        referredName: safeReferredName,
+        referredHandle: safeReferredHandle,
+        rewardCoins,
+        totalReferrals,
+        totalReferralCoins,
+      });
+      botDmSent = dm.sent;
+      botDmReason = dm.reason;
+    }
+
+    return {
+      ok: true,
+      activated: activatedNow,
+      alreadyActivated,
+      referrerUid: preReferrerUid,
+      coinsRewarded: activatedNow ? rewardCoins : 0,
+      botDmSent,
+      ...(botDmReason ? { botDmReason } : {}),
+    };
+  } catch {
+    return { ok: false, activated: false, coinsRewarded: 0, botDmSent: false };
   }
 }
 
@@ -2875,9 +3188,13 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
       let updatedRefStatus = '';
       if (refResult.ok && refResult.applied) {
         deletePendingReferral(numericChatId);
-        updatedRefStatus = `🎁 <b>Referral Applied!</b> Joined via <b>${escapeHtml(
-          refResult.referrerName || 'your friend',
-        )}</b> — <b>+${REFERRED_WELCOME_BONUS_COINS} Welcome Coins</b> credited to your farm!`;
+        updatedRefStatus = refResult.activated
+          ? `🎁 <b>Referral Applied!</b> Joined via <b>${escapeHtml(
+              refResult.referrerName || 'your friend',
+            )}</b> — <b>+${REFERRED_WELCOME_BONUS_COINS} Welcome Coins</b> credited to your farm!`
+          : `🎁 <b>Referral Linked!</b> Joined via <b>${escapeHtml(
+              refResult.referrerName || 'your friend',
+            )}</b> — <b>+${REFERRED_WELCOME_BONUS_COINS} Welcome Coins</b> credited! Buy your first hen in the Mini App to unlock their <b>+${BONUS_PER_REFERRAL} Coin</b> bonus.`;
       } else if (
         refResult.ok &&
         (refResult.reason === 'already_linked' ||
@@ -3664,6 +3981,25 @@ async function startServer() {
   });
 
   app.use(express.json({ limit: '100kb' }));
+
+  app.use((req, _res, next) => {
+    if (!cachedBotMenuWebAppUrl) {
+      const proto = String(req.headers['x-forwarded-proto'] || req.protocol || '')
+        .split(',')[0]
+        ?.trim()
+        .toLowerCase();
+      const host = String(req.headers['x-forwarded-host'] || req.headers.host || '')
+        .split(',')[0]
+        ?.trim();
+      if (proto === 'https' && host) {
+        const candidate = `https://${host}`;
+        if (isSafePublicHttpsUrl(candidate)) {
+          cachedBotMenuWebAppUrl = candidate;
+        }
+      }
+    }
+    next();
+  });
 
   app.get('/api/config', async (_req, res) => {
     const [channelsCfg, telegramBotUsername, adminSecurity, maintenanceCfg] = await Promise.all([
@@ -5402,10 +5738,13 @@ async function startServer() {
         ok: true,
         claimed: false,
         applied: false,
+        activated: Boolean(result.activated),
+        referralActivated: Boolean(result.activated),
         alreadyLinked: true,
         reason: 'already_linked',
         message: 'Already referred',
         referrerUid: result.referrerUid,
+        nextReferredCoins: result.nextReferredCoins,
       });
       return;
     }
@@ -5419,9 +5758,11 @@ async function startServer() {
         ok: true,
         claimed: true,
         applied: true,
-        status: 'verified',
-        bonusAwarded: result.coinsRewarded ?? BONUS_PER_REFERRAL,
-        coinsRewarded: result.coinsRewarded ?? BONUS_PER_REFERRAL,
+        activated: Boolean(result.activated),
+        referralActivated: Boolean(result.activated),
+        status: result.activated ? 'verified' : 'pending',
+        bonusAwarded: result.coinsRewarded ?? 0,
+        coinsRewarded: result.coinsRewarded ?? 0,
         referredBonusCoins: result.referredBonusCoins ?? REFERRED_WELCOME_BONUS_COINS,
         nextReferredCoins: result.nextReferredCoins,
         referrerUid: result.referrerUid,
@@ -5536,9 +5877,9 @@ async function startServer() {
           uid: refUid,
           name: `Farmer ${numId.slice(-4)}`,
           handle: `@tg_${numId}`,
-          bonus: BONUS_PER_REFERRAL,
-          coinsEarned: BONUS_PER_REFERRAL,
-          status: 'verified',
+          bonus: 0,
+          coinsEarned: 0,
+          status: 'pending',
           toppedUpUsd: 0,
           date: new Date().toISOString(),
           createdAtMs: Date.now(),
@@ -5691,9 +6032,11 @@ async function startServer() {
           ok: true,
           applied: true,
           alreadyApplied: false,
+          activated: Boolean(result.activated),
+          referralActivated: Boolean(result.activated),
           referrerUid: result.referrerUid,
           referrerName: result.referrerName,
-          coinsRewarded: result.coinsRewarded,
+          coinsRewarded: result.coinsRewarded ?? 0,
           referredBonusCoins: result.referredBonusCoins ?? REFERRED_WELCOME_BONUS_COINS,
           nextReferredCoins: result.nextReferredCoins,
         });
@@ -5714,6 +6057,8 @@ async function startServer() {
               ok: true,
               applied: false,
               alreadyApplied: true,
+              activated: Boolean(data?.referralActivated),
+              referralActivated: Boolean(data?.referralActivated),
               referrerUid: referredBy,
               nextReferredCoins: Number(data?.coins ?? 0),
             });
@@ -5726,6 +6071,45 @@ async function startServer() {
     }
 
     res.json({ ok: true, applied: false, alreadyApplied: false });
+  });
+
+  app.post('/api/referrals/activate', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`ref_activate:${ip}`, 30, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, error: 'Too many requests.' });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      referredUid?: string;
+      referrerUid?: string;
+      referredName?: string;
+      referredHandle?: string;
+      initData?: string;
+      token?: string;
+    };
+
+    const verifiedActor = resolveVerifiedPlayerActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+    });
+    const rawReferredUid = String(body.referredUid || '').trim();
+    const targetUid = verifiedActor || (isValidSafeId(rawReferredUid) ? rawReferredUid : '');
+    if (!targetUid) {
+      res.status(400).json({ ok: false, error: 'Valid referredUid required' });
+      return;
+    }
+
+    const result = await activateReferralInServerDb({
+      referredUid: targetUid,
+      referrerUidHint: body.referrerUid,
+      referredName: body.referredName,
+      referredHandle: body.referredHandle,
+    });
+
+    res.json(result);
   });
 
   app.post('/api/referrals/notify', async (req, res) => {
@@ -6668,7 +7052,12 @@ async function startServer() {
           if (pSnap.empty) break;
 
           const playerDocs = pSnap.docs.filter(
-            (d) => d.id !== ADMIN_PASSCODE_VAULT_UID && !d.id.startsWith('__'),
+            (d) =>
+              d.id !== ADMIN_PASSCODE_VAULT_UID &&
+              d.id !== MAINTENANCE_PROFILE_DOC_ID &&
+              d.id !== SYSTEM_RESET_PROFILE_DOC_ID &&
+              !d.id.startsWith('__') &&
+              !d.id.startsWith('sys_'),
           );
           await runConcurrent(playerDocs, 10, async (d) => {
             const cleanReferrals = async () => {
@@ -6855,7 +7244,12 @@ async function startServer() {
           );
           if (lbSnap.empty) break;
           const lbDocs = lbSnap.docs.filter(
-            (d) => d.id !== ADMIN_PASSCODE_VAULT_UID && !d.id.startsWith('__'),
+            (d) =>
+              d.id !== ADMIN_PASSCODE_VAULT_UID &&
+              d.id !== MAINTENANCE_PROFILE_DOC_ID &&
+              d.id !== SYSTEM_RESET_PROFILE_DOC_ID &&
+              !d.id.startsWith('__') &&
+              !d.id.startsWith('sys_'),
           );
           await runConcurrent(lbDocs, 20, async (d) => {
             try {
@@ -7041,6 +7435,9 @@ async function startServer() {
     `botToken=${hasInitialBotToken} (${getBotTokenSource()}) · firestore=${Boolean(serverDb)}`,
   );
   if (hasInitialBotToken) {
+    if (!cachedBotMenuWebAppUrl) {
+      void refreshBotMenuWebAppUrl(getTelegramBotToken());
+    }
     void probeBotHeartbeat(true);
   }
 }

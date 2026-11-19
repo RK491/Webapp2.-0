@@ -363,26 +363,44 @@ export function getBrowserStartParam(): string {
   });
 }
 
+export function hasTelegramRuntimeContext(): boolean {
+  if (typeof window === 'undefined') return false;
+  const win = window as unknown as TelegramWindow & {
+    TelegramWebviewProxy?: unknown;
+    Telegram?: TelegramWindow['Telegram'] & { WebView?: unknown };
+  };
+  const webApp = win.Telegram?.WebApp;
+  const platform = String(webApp?.platform || '').trim().toLowerCase();
+  const search = window.location.search || '';
+  const hash = window.location.hash || '';
+
+  return Boolean(
+    (webApp?.initData && webApp.initData.trim()) ||
+      webApp?.initDataUnsafe?.user?.id ||
+      (platform && platform !== 'unknown') ||
+      win.TelegramWebviewProxy ||
+      (win.Telegram?.WebView && hash.includes('tgWebApp')) ||
+      hash.includes('tgWebAppData=') ||
+      hash.includes('tgWebAppStartParam=') ||
+      search.includes('tgWebAppData=') ||
+      search.includes('tgWebAppStartParam=') ||
+      search.includes('tg_id='),
+  );
+}
+
 export function ensureTelegramWebAppReady(): boolean {
   if (typeof window === 'undefined') return false;
   const win = window as unknown as TelegramWindow;
   const webApp = win.Telegram?.WebApp;
-  if (!webApp) return false;
-  try {
-    webApp.ready?.();
-    webApp.expand?.();
-  } catch {
-    // Ignore outside Telegram
+  if (webApp) {
+    try {
+      webApp.ready?.();
+      webApp.expand?.();
+    } catch {
+      // Ignore outside Telegram
+    }
   }
-  const platform = String(webApp.platform || '').trim().toLowerCase();
-  const hasTgContext = Boolean(
-    (webApp.initData && webApp.initData.trim()) ||
-      webApp.initDataUnsafe?.user?.id ||
-      (platform && platform !== 'unknown') ||
-      window.location.hash.includes('tgWebAppData=') ||
-      window.location.hash.includes('tgWebAppStartParam='),
-  );
-  return hasTgContext;
+  return hasTelegramRuntimeContext();
 }
 
 export function resolveTelegramUserIdentity(params: {

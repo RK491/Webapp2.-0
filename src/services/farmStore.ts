@@ -65,6 +65,7 @@ import {
   matchesAdminRecord,
   normalizePlayerBanId,
   normalizeTelegramChannelEntry,
+  REFERRAL_DEPOSIT_COMMISSION_RATE,
   REFERRED_WELCOME_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_COINS,
   resolveMaintenanceConfig,
@@ -596,6 +597,7 @@ export async function applyReferralCodeInFirestore(
       referrerUid: string;
       referrerName: string;
       coinsRewarded: number;
+      activated: boolean;
     }
   | { error: string }
 > {
@@ -708,7 +710,7 @@ export async function applyReferralCodeInFirestore(
     let nextProfile: UserFarmProfile = {
       ...currentProfile,
       referredBy: referrerUid,
-      referralActivated: true,
+      referralActivated: calculateTotalChickens(currentProfile) > 0,
       coins: currentProfile.coins + REFERRED_WELCOME_BONUS_COINS,
     };
 
@@ -725,6 +727,7 @@ export async function applyReferralCodeInFirestore(
     };
 
     let alreadyLinked = false;
+    let activatedOnLink = false;
     await runTransaction(db, async (transaction) => {
       const [playerSnap, playerLbSnap, referrerPlayerSnap, referrerLbSnap, existingRefSnap] =
         await Promise.all([
@@ -740,6 +743,19 @@ export async function applyReferralCodeInFirestore(
         return;
       }
 
+      if (!referrerPlayerSnap.exists()) {
+        throw new Error('REFERRER_MISSING');
+      }
+
+      const existingChickenCount = playerSnap.exists()
+        ? Number(playerSnap.data().leghornCount ?? 0) +
+          Number(playerSnap.data().rhodeCount ?? 0) +
+          Number(playerSnap.data().orpingtonCount ?? 0) +
+          Number(playerSnap.data().australorpCount ?? 0)
+        : calculateTotalChickens(currentProfile);
+      const hasOwnedChicken = existingChickenCount > 0;
+      activatedOnLink = hasOwnedChicken;
+
       if (playerSnap.exists()) {
         const liveCoins = Number(playerSnap.data().coins ?? currentProfile.coins);
         const { updatedProfile, firestorePayload } = buildUpdatedPlayerFromRaw(
@@ -747,13 +763,17 @@ export async function applyReferralCodeInFirestore(
           currentProfile.uid,
           {
             referredBy: referrerUid,
-            referralActivated: true,
+            referralActivated: hasOwnedChicken,
             coins: liveCoins + REFERRED_WELCOME_BONUS_COINS,
           },
         );
         nextProfile = updatedProfile;
         transaction.update(playerRef, firestorePayload);
       } else {
+        nextProfile = {
+          ...nextProfile,
+          referralActivated: hasOwnedChicken,
+        };
         transaction.set(playerRef, toFirestoreProfilePayload(nextProfile, true));
       }
 
@@ -777,65 +797,64 @@ export async function applyReferralCodeInFirestore(
         createdAt: serverTimestamp(),
       });
 
-      const rawName = (currentProfile.displayName || '').trim();
+      const rawName = (nextProfile.displayName || currentProfile.displayName || '').trim();
       const safeReferredName = (rawName || `Farmer ${currentProfile.uid.slice(-4)}`).slice(0, 60);
-      const rawHandle = formatReferralHandle(currentProfile.handle, currentProfile.uid).trim();
+      const rawHandle = formatReferralHandle(nextProfile.handle || currentProfile.handle, currentProfile.uid).trim();
       const safeReferredHandle = (rawHandle || `@farmer_${currentProfile.uid.slice(-4)}`).slice(0, 40);
 
-      // Immediately activate referral and award +150 coins to the referrer upon detection
+      // Link immediately as 'pending'; +150 coin referrer reward unlocks when referred user buys their first hen (miner).
+      // If user already owns a hen (delayed recovery), activate immediately.
       transaction.set(referralDocRef, {
         referrerUid,
         referredUid: currentProfile.uid,
         referredName: safeReferredName,
         referredHandle: safeReferredHandle,
-        status: 'active',
-        coinsEarned: rewardCoins,
+        status: hasOwnedChicken ? 'active' : 'pending',
+        coinsEarned: hasOwnedChicken ? rewardCoins : 0,
         toppedUpUsd: 0,
         createdAtMs: nowMs,
         createdAt: serverTimestamp(),
       });
 
-      if (!referrerPlayerSnap.exists()) {
-        throw new Error('REFERRER_MISSING');
-      }
-
-      const rp = referrerPlayerSnap.data();
-      const nextRefPlayerCoins = Number(rp.coins ?? 0) + rewardCoins;
-      const nextRefCount = Number(rp.referralCount ?? 0) + 1;
-      const nextRefCoinsEarned = Number(rp.referralCoinsEarned ?? 0) + rewardCoins;
-      const { updatedProfile: updatedReferrer, firestorePayload } = buildUpdatedPlayerFromRaw(
-        rp,
-        referrerUid,
-        {
-          coins: nextRefPlayerCoins,
-          referralCount: nextRefCount,
-          referralCoinsEarned: nextRefCoinsEarned,
-        },
-      );
-
-      transaction.update(referrerPlayerRef, firestorePayload);
-
-      if (referrerLbSnap.exists()) {
-        transaction.update(
-          referrerLbRef,
-          buildUpdatedLeaderboardFromRaw(referrerLbSnap.data(), updatedReferrer),
+      if (hasOwnedChicken) {
+        const rp = referrerPlayerSnap.data();
+        const nextRefPlayerCoins = Number(rp.coins ?? 0) + rewardCoins;
+        const nextRefCount = Number(rp.referralCount ?? 0) + 1;
+        const nextRefCoinsEarned = Number(rp.referralCoinsEarned ?? 0) + rewardCoins;
+        const { updatedProfile: updatedReferrer, firestorePayload } = buildUpdatedPlayerFromRaw(
+          rp,
+          referrerUid,
+          {
+            coins: nextRefPlayerCoins,
+            referralCount: nextRefCount,
+            referralCoinsEarned: nextRefCoinsEarned,
+          },
         );
-      } else {
-        transaction.set(referrerLbRef, toLeaderboardPayload(updatedReferrer));
-      }
 
-      const refRewardTxId = `tx_ref_earned_${currentProfile.uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16)}_${nowMs}`.slice(0, 64);
-      transaction.set(doc(db, 'players', referrerUid, 'transactions', refRewardTxId), {
-        userId: referrerUid,
-        type: 'referral',
-        title: `Referral reward (+${rewardCoins} coins): ${safeReferredName}`.slice(0, 80),
-        amount: rewardCoins,
-        currency: 'coins',
-        usdValue: Number((rewardCoins / 10000).toFixed(4)),
-        status: 'completed',
-        createdAtMs: nowMs,
-        createdAt: serverTimestamp(),
-      });
+        transaction.update(referrerPlayerRef, firestorePayload);
+
+        if (referrerLbSnap.exists()) {
+          transaction.update(
+            referrerLbRef,
+            buildUpdatedLeaderboardFromRaw(referrerLbSnap.data(), updatedReferrer),
+          );
+        } else {
+          transaction.set(referrerLbRef, toLeaderboardPayload(updatedReferrer));
+        }
+
+        const refRewardTxId = `tx_ref_earned_${currentProfile.uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16)}_${nowMs}`.slice(0, 64);
+        transaction.set(doc(db, 'players', referrerUid, 'transactions', refRewardTxId), {
+          userId: referrerUid,
+          type: 'referral',
+          title: `Referral reward (+${rewardCoins} coins): ${safeReferredName}`.slice(0, 80),
+          amount: rewardCoins,
+          currency: 'coins',
+          usdValue: Number((rewardCoins / 10000).toFixed(4)),
+          status: 'completed',
+          createdAtMs: nowMs,
+          createdAt: serverTimestamp(),
+        });
+      }
     });
 
     if (alreadyLinked) {
@@ -848,7 +867,8 @@ export async function applyReferralCodeInFirestore(
       transaction: userTx,
       referrerUid,
       referrerName,
-      coinsRewarded: rewardCoins,
+      coinsRewarded: activatedOnLink ? rewardCoins : 0,
+      activated: activatedOnLink,
     };
   } catch (error) {
     if (error instanceof Error && error.message === 'REFERRER_MISSING') {
@@ -904,7 +924,11 @@ export async function commitPlayerMutation(params: {
           });
         }
 
-        if (refSnap.exists() && refSnap.data().status === 'pending' && referrerPlayerSnap.exists()) {
+        const shouldCreditReferrer =
+          referrerPlayerSnap.exists() &&
+          (!refSnap.exists() || refSnap.data().status === 'pending');
+
+        if (shouldCreditReferrer) {
           const rp = referrerPlayerSnap.data();
           const nextCoins = Number(rp.coins ?? 0) + REFERRER_SIGNUP_BONUS_COINS;
           const nextRefCount = Number(rp.referralCount ?? 0) + 1;
@@ -919,10 +943,26 @@ export async function commitPlayerMutation(params: {
             },
           );
 
-          transaction.update(refDocRef, {
-            status: 'active',
-            coinsEarned: REFERRER_SIGNUP_BONUS_COINS,
-          });
+          if (refSnap.exists()) {
+            transaction.update(refDocRef, {
+              status: 'active',
+              coinsEarned: Number(refSnap.data().coinsEarned ?? 0) + REFERRER_SIGNUP_BONUS_COINS,
+            });
+          } else {
+            const safeReferredName = (params.profile.displayName || `Farmer ${uid.slice(-4)}`).trim().slice(0, 60) || 'Farmer';
+            const safeReferredHandle = formatReferralHandle(params.profile.handle, uid).slice(0, 40);
+            transaction.set(refDocRef, {
+              referrerUid: refUid,
+              referredUid: uid,
+              referredName: safeReferredName,
+              referredHandle: safeReferredHandle,
+              status: 'active',
+              coinsEarned: REFERRER_SIGNUP_BONUS_COINS,
+              toppedUpUsd: 0,
+              createdAtMs: nowMs,
+              createdAt: serverTimestamp(),
+            });
+          }
 
           transaction.update(referrerPlayerRef, firestorePayload);
 
@@ -1048,8 +1088,24 @@ export async function commitPlayerMutation(params: {
         : null;
     const playerRef = doc(db, 'players', uid);
     const lbRef = doc(db, 'leaderboard', uid);
-    const hasCommission = Boolean(params.profile.referredBy && (params.referrerCommissionCoins ?? 0) > 0);
-    const refUid = params.profile.referredBy;
+    let refUid = (params.profile.referredBy || '').trim();
+    if (!refUid) {
+      const remotePlayerSnap = await getDocFromServer(playerRef).catch(() =>
+        getDoc(playerRef).catch(() => null),
+      );
+      if (remotePlayerSnap?.exists()) {
+        refUid = String(remotePlayerSnap.data()?.referredBy || '').trim();
+      }
+    }
+    const computedCommission = refUid
+      ? Math.max(
+          1,
+          params.referrerCommissionCoins && params.referrerCommissionCoins > 0
+            ? Math.round(params.referrerCommissionCoins)
+            : Math.round(dep.coinsAmount * REFERRAL_DEPOSIT_COMMISSION_RATE),
+        )
+      : 0;
+    const hasCommission = Boolean(refUid && computedCommission > 0);
     const refPlayerRef = hasCommission ? doc(db, 'players', refUid) : null;
     const refRelRef = hasCommission ? doc(db, 'players', refUid, 'referrals', uid) : null;
 
@@ -1080,7 +1136,7 @@ export async function commitPlayerMutation(params: {
           ...(remoteReferredBy && !params.profile.referredBy
             ? {
                 referredBy: remoteReferredBy,
-                referralActivated: Boolean(playerRaw?.referralActivated ?? true),
+                referralActivated: Boolean(playerRaw?.referralActivated ?? false),
               }
             : {}),
           ...(playerRaw?.createdAtMs !== undefined
@@ -1130,7 +1186,7 @@ export async function commitPlayerMutation(params: {
         }
 
         if (hasCommission && refPlayerRef && refRelRef && refPlayerSnap?.exists()) {
-          const commission = params.referrerCommissionCoins!;
+          const commission = computedCommission;
           const refCoins = Number(refPlayerSnap.data().coins ?? 0);
           const refEarned = Number(refPlayerSnap.data().referralCoinsEarned ?? 0);
           const ids = buildDeterministicDepositIds(dep.txHash || depId);
@@ -1146,10 +1202,26 @@ export async function commitPlayerMutation(params: {
           transaction.update(refPlayerRef, refFirestorePayload);
 
           if (refRelSnap?.exists()) {
+            const preservedStatus =
+              refRelSnap.data().status === 'pending' ? 'pending' : 'active';
             transaction.update(refRelRef, {
-              status: 'active',
+              status: preservedStatus,
               coinsEarned: Number(refRelSnap.data().coinsEarned ?? 0) + commission,
               toppedUpUsd: Number(refRelSnap.data().toppedUpUsd ?? 0) + dep.usdAmount,
+            });
+          } else {
+            const safeReferredName = (syncedProfile.displayName || `Farmer ${uid.slice(-4)}`).trim().slice(0, 60) || 'Farmer';
+            const safeReferredHandle = formatReferralHandle(syncedProfile.handle, uid).slice(0, 40);
+            transaction.set(refRelRef, {
+              referrerUid: refUid,
+              referredUid: uid,
+              referredName: safeReferredName,
+              referredHandle: safeReferredHandle,
+              status: syncedProfile.referralActivated ? 'active' : 'pending',
+              coinsEarned: commission,
+              toppedUpUsd: dep.usdAmount,
+              createdAtMs: dep.createdAtMs,
+              createdAt: serverTimestamp(),
             });
           }
 
@@ -1188,7 +1260,7 @@ export async function commitPlayerMutation(params: {
       ...(shouldPreserveConcurrentReferral
         ? {
             referredBy: remoteReferredBy,
-            referralActivated: Boolean(existingRaw.referralActivated ?? true),
+            referralActivated: Boolean(existingRaw.referralActivated ?? false),
             coins: safeBoundedCoins(
               params.profile.coins + REFERRED_WELCOME_BONUS_COINS,
               params.profile.coins,
@@ -3268,7 +3340,7 @@ export async function fetchPlayerByIdOrCodeFromFirestore(
       };
 
       for (const d of playersSnap.docs) {
-        if (matchesRecord(d.data(), d.id)) {
+        if (!isReservedSystemPlayerDocId(d.id) && matchesRecord(d.data(), d.id)) {
           return parseProfileDoc(d.data(), d.id);
         }
       }
@@ -3970,8 +4042,8 @@ export async function saveTaskPricingConfigInFirestore(
   }
 }
 
-export const MAINTENANCE_PROFILE_DOC_ID = '__maintenance_cfg__';
-export const SYSTEM_RESET_PROFILE_DOC_ID = '__system_reset__';
+export const MAINTENANCE_PROFILE_DOC_ID = 'sys_maintenance_cfg';
+export const SYSTEM_RESET_PROFILE_DOC_ID = 'sys_system_reset';
 
 export function isReservedSystemPlayerDocId(docId: string): boolean {
   const clean = String(docId || '').trim();
@@ -3979,7 +4051,10 @@ export function isReservedSystemPlayerDocId(docId: string): boolean {
     clean === ADMIN_PASSCODE_VAULT_UID ||
     clean === MAINTENANCE_PROFILE_DOC_ID ||
     clean === SYSTEM_RESET_PROFILE_DOC_ID ||
-    clean.startsWith('__')
+    clean === '__maintenance_cfg__' ||
+    clean === '__system_reset__' ||
+    clean.startsWith('__') ||
+    clean.startsWith('sys_')
   );
 }
 

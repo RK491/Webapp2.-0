@@ -226,6 +226,7 @@ import {
   getLocalAdminBotConfig,
   getTelegramChannelUrl,
   getTelegramInitData,
+  hasTelegramRuntimeContext,
   loadLocalChannelLogs,
   parseStartAppAction,
   resolveApiUrl,
@@ -590,9 +591,6 @@ export default function App() {
       }
       return liveAction.referralCode;
     }
-    if (liveAction.actionTab) {
-      return null;
-    }
     if (typeof window !== 'undefined') {
       try {
         const stored = localStorage.getItem(PENDING_REF_STORAGE_KEY);
@@ -620,10 +618,10 @@ export default function App() {
   const ensurePromiseRef = useRef<Promise<UserFarmProfile | void>>(Promise.resolve());
   const [isPlayerSynced, setIsPlayerSynced] = useState(false);
   const prevWithdrawalStatusRef = useRef<Map<string, string> | null>(null);
-  const seenReferralIdsRef = useRef<{ uid: string; hydrated: boolean; ids: Set<string> }>({
+  const seenReferralIdsRef = useRef<{ uid: string; hydrated: boolean; statuses: Map<string, string> }>({
     uid: '',
     hydrated: false,
-    ids: new Set(),
+    statuses: new Map(),
   });
   const appSessionStartedAtRef = useRef<number>(Date.now());
   const userSelectedLangRef = useRef<LanguageCode | null>(null);
@@ -1076,7 +1074,7 @@ export default function App() {
     referralAttemptedKeysRef.current.clear();
     claimPendingAttemptsRef.current = { uid: '', count: 0, resolved: false };
     prevWithdrawalStatusRef.current = null;
-    seenReferralIdsRef.current = { uid: targetUid, hydrated: true, ids: new Set() };
+    seenReferralIdsRef.current = { uid: targetUid, hydrated: true, statuses: new Map() };
   }, []);
 
   useEffect(() => {
@@ -1182,30 +1180,44 @@ export default function App() {
       onReferrals: (refs: ReferralRecord[]) => {
         const currentTracker = seenReferralIdsRef.current;
         if (currentTracker.uid !== activePlayerId) {
+          const initialStatuses = new Map<string, string>();
+          for (const r of refs) {
+            const key = r.referredUid || r.id;
+            if (key) initialStatuses.set(key, r.status);
+          }
           seenReferralIdsRef.current = {
             uid: activePlayerId,
             hydrated: true,
-            ids: new Set(refs.map((r) => r.referredUid || r.id).filter(Boolean)),
+            statuses: initialStatuses,
           };
         } else if (!currentTracker.hydrated) {
           for (const r of refs) {
             const key = r.referredUid || r.id;
-            if (key) currentTracker.ids.add(key);
+            if (key) currentTracker.statuses.set(key, r.status);
           }
           currentTracker.hydrated = true;
         } else {
-          const freshArrivals: ReferralRecord[] = [];
+          const newlyJoinedPending: ReferralRecord[] = [];
+          const newlyActivated: ReferralRecord[] = [];
           for (const r of refs) {
             const key = r.referredUid || r.id;
-            if (!key || currentTracker.ids.has(key)) continue;
-            currentTracker.ids.add(key);
-            // Notify when joined during this session (avoids stale cache re-hydrating old rows)
-            if (!r.createdAtMs || r.createdAtMs >= appSessionStartedAtRef.current - 120_000) {
-              freshArrivals.push(r);
+            if (!key) continue;
+            const prevStatus = currentTracker.statuses.get(key);
+            currentTracker.statuses.set(key, r.status);
+            if (!prevStatus) {
+              if (!r.createdAtMs || r.createdAtMs >= appSessionStartedAtRef.current - 120_000) {
+                if (r.status === 'active') {
+                  newlyActivated.push(r);
+                } else {
+                  newlyJoinedPending.push(r);
+                }
+              }
+            } else if (prevStatus === 'pending' && r.status === 'active') {
+              newlyActivated.push(r);
             }
           }
-          if (freshArrivals.length > 0) {
-            const newest = freshArrivals[0];
+          if (newlyActivated.length > 0) {
+            const newest = newlyActivated[0];
             const friendLabel =
               newest.referredName ||
               (newest.referredHandle ? `@${newest.referredHandle.replace(/^@/, '')}` : 'A friend');
@@ -1216,15 +1228,24 @@ export default function App() {
             triggerRewardConfetti();
             playClaimSound(soundsEnabledRef.current);
             triggerHapticFeedback('success');
-            if (freshArrivals.length === 1) {
+            if (newlyActivated.length === 1) {
               showToast(
-                `🎉 New Referral Received! ${friendLabel} joined (+${coinsEarned.toLocaleString()} Coins)!`,
+                `🎉 Referral Activated! ${friendLabel} bought their 1st hen (+${coinsEarned.toLocaleString()} Coins)!`,
               );
             } else {
               showToast(
-                `🎉 ${freshArrivals.length} New Referrals Received! Check Friends tab for your rewards!`,
+                `🎉 ${newlyActivated.length} Referrals Activated! Check Friends tab for your rewards!`,
               );
             }
+          } else if (newlyJoinedPending.length > 0) {
+            const newest = newlyJoinedPending[0];
+            const friendLabel =
+              newest.referredName ||
+              (newest.referredHandle ? `@${newest.referredHandle.replace(/^@/, '')}` : 'A friend');
+            triggerHapticFeedback('light');
+            showToast(
+              `👋 ${friendLabel} joined via your link! +${REFERRER_SIGNUP_BONUS_COINS} coins unlock when they buy their 1st hen.`,
+            );
           }
         }
         setReferrals(refs);
@@ -1369,7 +1390,7 @@ export default function App() {
       }
     };
 
-    const markReferralVerifiedLocally = (referrerUid: string) => {
+    const markReferralVerifiedLocally = (referrerUid: string, activated?: boolean) => {
       try {
         localStorage.setItem(
           `alphagram_referral_verified_v1_${targetUid}`,
@@ -1384,11 +1405,13 @@ export default function App() {
       }
       setProfile((prev) => {
         if (prev.uid !== targetUid) return prev;
-        if (prev.referredBy && prev.referralActivated) return prev;
+        const nextActivated =
+          typeof activated === 'boolean' ? prev.referralActivated || activated : prev.referralActivated;
+        if (prev.referredBy && prev.referralActivated === nextActivated) return prev;
         const next: UserFarmProfile = {
           ...prev,
           referredBy: prev.referredBy || referrerUid,
-          referralActivated: true,
+          referralActivated: nextActivated,
         };
         latestProfileRef.current = next;
         saveCachedPlayerProfile(next);
@@ -1416,7 +1439,7 @@ export default function App() {
     };
 
     if (currentProfile.referredBy) {
-      markReferralVerifiedLocally(currentProfile.referredBy);
+      markReferralVerifiedLocally(currentProfile.referredBy, currentProfile.referralActivated);
       void syncDirectReferralRecord(currentProfile.referredBy, currentProfile);
       clearPendingRef();
       return;
@@ -1508,6 +1531,8 @@ export default function App() {
             ok?: boolean;
             claimed?: boolean;
             applied?: boolean;
+            activated?: boolean;
+            referralActivated?: boolean;
             alreadyLinked?: boolean;
             reason?: string;
             referrerUid?: string;
@@ -1526,21 +1551,22 @@ export default function App() {
               const bonus = Number(payload.referredBonusCoins ?? 100);
               const serverNextCoins = Number(payload.nextReferredCoins);
               const resolvedReferrer = payload.referrerUid || refCode;
+              const isActivatedNow = Boolean(payload.activated ?? payload.referralActivated);
               setProfile((prev) => {
                 if (prev.uid !== targetUid || prev.referredBy) return prev;
                 const next: UserFarmProfile = {
                   ...prev,
                   referredBy: resolvedReferrer,
-                  referralActivated: true,
+                  referralActivated: prev.referralActivated || isActivatedNow,
                   coins: Number.isFinite(serverNextCoins) ? serverNextCoins : prev.coins + bonus,
                 };
                 latestProfileRef.current = next;
                 saveCachedPlayerProfile(next);
                 return next;
               });
-              markReferralVerifiedLocally(resolvedReferrer);
+              markReferralVerifiedLocally(resolvedReferrer, isActivatedNow);
               void syncDirectReferralRecord(resolvedReferrer, latestBefore);
-              if (!payload.botDmSent && payload.referrerUid) {
+              if (isActivatedNow && !payload.botDmSent && payload.referrerUid) {
                 void sendLocalReferralDmFallback(
                   payload.referrerUid,
                   Number(
@@ -1554,14 +1580,17 @@ export default function App() {
               playClaimSound(soundsEnabledRef.current);
               triggerHapticFeedback('success');
               showToast(
-                `🎉 Referral Bonus! +${bonus} welcome coins unlocked via ${payload.referrerName || 'a friend'}!`,
+                `🎉 Referral Linked! +${bonus} welcome coins unlocked via ${payload.referrerName || 'a friend'}!`,
               );
               clearPendingRef();
               return;
             }
             if (payload.reason === 'already_linked' || payload.alreadyLinked) {
               if (payload.referrerUid) {
-                markReferralVerifiedLocally(payload.referrerUid);
+                markReferralVerifiedLocally(
+                  payload.referrerUid,
+                  Boolean(payload.activated ?? payload.referralActivated),
+                );
               }
               clearPendingRef();
               return;
@@ -1596,30 +1625,32 @@ export default function App() {
             latestProfileRef.current = refRes.profile;
             setProfile(refRes.profile);
             saveCachedPlayerProfile(refRes.profile);
-            markReferralVerifiedLocally(refRes.referrerUid);
+            markReferralVerifiedLocally(refRes.referrerUid, refRes.activated);
             void syncDirectReferralRecord(refRes.referrerUid, refRes.profile);
             triggerRewardConfetti();
             playClaimSound(soundsEnabledRef.current);
             triggerHapticFeedback('success');
             showToast(
-              `🎉 Referral Bonus! +100 welcome coins unlocked via ${refRes.referrerName}!`,
+              `🎉 Referral Linked! +100 welcome coins unlocked via ${refRes.referrerName}!`,
             );
-            const notifyPayload = await safeFetchJson<{ ok?: boolean; sent?: boolean }>('/api/referrals/notify', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                event: 'referral_joined',
-                referrerUid: refRes.referrerUid,
-                referredUid: refRes.profile.uid,
-                referredName: refRes.profile.displayName,
-                referredHandle: refRes.profile.handle,
-                rewardCoins: refRes.coinsRewarded,
-                initData: getTelegramInitData(),
-                token: playerSessionTokenRef.current,
-              }),
-            });
-            if (!notifyPayload?.sent) {
-              await sendLocalReferralDmFallback(refRes.referrerUid, refRes.coinsRewarded);
+            if (refRes.activated) {
+              const notifyPayload = await safeFetchJson<{ ok?: boolean; sent?: boolean }>('/api/referrals/notify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  event: 'referral_joined',
+                  referrerUid: refRes.referrerUid,
+                  referredUid: refRes.profile.uid,
+                  referredName: refRes.profile.displayName,
+                  referredHandle: refRes.profile.handle,
+                  rewardCoins: refRes.coinsRewarded,
+                  initData: getTelegramInitData(),
+                  token: playerSessionTokenRef.current,
+                }),
+              });
+              if (!notifyPayload?.sent) {
+                await sendLocalReferralDmFallback(refRes.referrerUid, refRes.coinsRewarded);
+              }
             }
             clearPendingRef();
             return;
@@ -1645,9 +1676,11 @@ export default function App() {
       void applyReferral();
     };
 
-    const inActiveTelegramWebView = ensureTelegramWebAppReady();
+    const inActiveTelegramWebView = ensureTelegramWebAppReady() || hasTelegramRuntimeContext();
     if (inActiveTelegramWebView && !detectedIdentity.isTelegramDetected && !/^tg_/.test(targetUid)) {
-      const hydrationTimer = window.setTimeout(runAttempt, 350);
+      // Wait for Telegram SDK initData / user hydration (~1.8s poll in syncIdentityAndStartParam)
+      // before falling back to guest ID, so the referral code isn't consumed by a temp guest ID.
+      const hydrationTimer = window.setTimeout(runAttempt, 1950);
       return () => window.clearTimeout(hydrationTimer);
     }
 
@@ -1717,6 +1750,8 @@ export default function App() {
             ok?: boolean;
             applied?: boolean;
             alreadyApplied?: boolean;
+            activated?: boolean;
+            referralActivated?: boolean;
             reason?: string;
             referrerUid?: string;
             referrerName?: string;
@@ -1728,12 +1763,13 @@ export default function App() {
               claimPendingAttemptsRef.current.resolved = true;
               const bonus = Number(payload.referredBonusCoins ?? 100);
               const serverNextCoins = Number(payload.nextReferredCoins);
+              const isActivatedNow = Boolean(payload.activated ?? payload.referralActivated);
               setProfile((prev) => {
-                if (prev.uid !== targetUid || prev.referredBy) return prev;
+                if (prev.uid !== targetUid || (prev.referredBy && prev.referralActivated === (prev.referralActivated || isActivatedNow))) return prev;
                 const next: UserFarmProfile = {
                   ...prev,
                   referredBy: payload.referrerUid || prev.referredBy,
-                  referralActivated: true,
+                  referralActivated: prev.referralActivated || isActivatedNow,
                   coins: Number.isFinite(serverNextCoins)
                     ? serverNextCoins
                     : payload.applied
@@ -1749,7 +1785,7 @@ export default function App() {
                 playClaimSound(soundsEnabledRef.current);
                 triggerHapticFeedback('success');
                 showToast(
-                  `🎉 Referral Bonus! +${bonus} welcome coins unlocked via ${payload.referrerName || 'a friend'}!`,
+                  `🎉 Referral Linked! +${bonus} welcome coins unlocked via ${payload.referrerName || 'a friend'}!`,
                 );
               }
               return;
@@ -2384,8 +2420,8 @@ export default function App() {
         referredUid: cleanId,
         referredName: `Farmer ${normKey.slice(-4).toUpperCase()}`,
         referredHandle: /^\d{4,20}$/.test(normKey) ? `@tg_${normKey}` : `@${normKey.slice(0, 16)}`,
-        status: 'active',
-        coinsEarned: REFERRER_SIGNUP_BONUS_COINS,
+        status: 'pending',
+        coinsEarned: 0,
         toppedUpUsd: 0,
         createdAtMs: Date.now(),
       });
@@ -2484,8 +2520,20 @@ export default function App() {
         transaction: res.transaction,
         activateReferral: res.shouldActivateReferral,
       });
-      if (res.shouldActivateReferral) {
-        showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''} & activated referral reward!`);
+      if (res.shouldActivateReferral && current.referredBy) {
+        void safeFetchJson('/api/referrals/activate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            referredUid: nextProfile.uid,
+            referrerUid: current.referredBy,
+            referredName: nextProfile.displayName,
+            referredHandle: nextProfile.handle,
+            initData: getTelegramInitData(),
+            token: playerSessionTokenRef.current,
+          }),
+        });
+        showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''} & unlocked +${REFERRER_SIGNUP_BONUS_COINS} referral bonus!`);
       } else {
         showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''}!`);
       }
@@ -2567,17 +2615,24 @@ export default function App() {
         referrerCommissionCoins: res.referrerCommissionCoins,
       });
       if (!applied) return false;
-      if (res.referrerCommissionCoins > 0 && current.referredBy) {
+      const effectiveReferrer = res.profile.referredBy || current.referredBy;
+      const effectiveCommission =
+        res.referrerCommissionCoins > 0
+          ? res.referrerCommissionCoins
+          : effectiveReferrer
+            ? Math.max(1, Math.round(res.deposit.coinsAmount * REFERRAL_DEPOSIT_COMMISSION_RATE))
+            : 0;
+      if (effectiveCommission > 0 && effectiveReferrer) {
         void safeFetchJson('/api/referrals/notify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             event: 'deposit_commission',
-            referrerUid: current.referredBy,
+            referrerUid: effectiveReferrer,
             referredUid: current.uid,
             referredName: current.displayName,
             referredHandle: current.handle,
-            rewardCoins: res.referrerCommissionCoins,
+            rewardCoins: effectiveCommission,
             depositGram: res.deposit.cryptoAmount,
             depositUsd: res.deposit.usdAmount,
             initData: getTelegramInitData(),
@@ -5735,19 +5790,19 @@ export default function App() {
             </div>
             <div className="space-y-2 text-xs">
               <div className="clay-card-mint !rounded-xl px-3 py-2 flex items-center justify-between">
-                <span className="font-bold text-stone-700 dark:text-stone-200">Per Referral Join</span>
+                <span className="font-bold text-stone-700 dark:text-stone-200">On Friend's 1st Hen</span>
                 <span className="font-extrabold font-mono-num text-emerald-700 dark:text-emerald-300">
                   +{REFERRER_SIGNUP_BONUS_COINS} Coins
                 </span>
               </div>
               <div className="clay-card-warm !rounded-xl px-3 py-2 flex items-center justify-between">
-                <span className="font-bold text-stone-700 dark:text-stone-200">Friend Deposit Share</span>
+                <span className="font-bold text-stone-700 dark:text-stone-200">Lifetime Deposit Share</span>
                 <span className="font-extrabold font-mono-num text-amber-700 dark:text-amber-300">
                   {Math.round(REFERRAL_DEPOSIT_COMMISSION_RATE * 100)}% Commission
                 </span>
               </div>
               <div className="text-[11px] text-stone-500 dark:text-stone-400 font-semibold">
-                Instant Telegram Bot notifications for every new referral &amp; deposit share.
+                Telegram Bot alerts on every 1st-hen referral unlock &amp; lifetime 5% deposit commission.
               </div>
             </div>
           </div>

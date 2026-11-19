@@ -126,6 +126,7 @@ import {
   PRIMARY_ADMIN_TELEGRAM_ID,
   REFERRAL_DEPOSIT_COMMISSION_RATE,
   REFERRAL_MILESTONE_CRATES,
+  REFERRED_WELCOME_BONUS_COINS,
   REFERRER_LIFETIME_EGG_COMMISSION_RATE,
   REFERRER_SIGNUP_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_EGGS,
@@ -3514,6 +3515,70 @@ test('Golden Egg 5-hour cooldown blocks repeat claims, handles clock skew, and u
   assert.equal(secondClaim.profile.lastGoldenEggAtMs, NOW + GOLDEN_EGG_COOLDOWN_MS);
   assert.equal(secondClaim.profile.goldenEggsFound, 2);
 });
+
+test('lifetime 5% deposit commission pays on 1st, 2nd, and 3rd deposits alongside 1st-miner referral activation', () => {
+  const { profile: base } = createDefaultProfile('tg_555000111', 'Maya', '@maya_tg', NOW);
+  let referred = {
+    ...base,
+    coins: base.coins + REFERRED_WELCOME_BONUS_COINS, // 1,000 starter + 100 welcome
+    referredBy: 'tg_7508911853',
+    referralActivated: false,
+  };
+
+  // 1st miner purchase unlocks referrer +150 coin bonus
+  const firstMiner = buyChickens(referred, 'leghorn', 1, NOW + 1000);
+  assert.ok(!('error' in firstMiner));
+  assert.equal(firstMiner.shouldActivateReferral, true);
+  assert.equal(firstMiner.profile.referralActivated, true);
+  referred = firstMiner.profile;
+
+  // 2nd miner purchase does NOT re-trigger referral activation
+  const refilled = { ...referred, coins: 5000 };
+  const secondMiner = buyChickens(refilled, 'leghorn', 1, NOW + 2000);
+  assert.ok(!('error' in secondMiner));
+  assert.equal(secondMiner.shouldActivateReferral, false);
+  referred = secondMiner.profile;
+
+  // Deposit #1, #2, and #3 all pay 5% lifetime commission
+  const dep1 = executeDeposit(referred, 2000, 'GRAM_TON', NOW + 3000, 'tx_life_001');
+  assert.ok(!('error' in dep1));
+  assert.equal(dep1.referrerCommissionCoins, 100);
+  referred = dep1.profile;
+
+  const dep2 = executeDeposit(referred, 5000, 'GRAM_TON', NOW + 4000, 'tx_life_002');
+  assert.ok(!('error' in dep2));
+  assert.equal(dep2.referrerCommissionCoins, 250);
+  referred = dep2.profile;
+
+  const dep3 = executeDeposit(referred, 10000, 'GRAM_TON', NOW + 5000, 'tx_life_003');
+  assert.ok(!('error' in dep3));
+  assert.equal(dep3.referrerCommissionCoins, 500);
+});
+
+test('bot-to-Mini-App web_app redirect preserves startapp referral code alongside Telegram hash data', () => {
+  const tgHash = '#tgWebAppData=user%3D%257B%2522id%2522%253A999111222%257D&tgWebAppVersion=8.0';
+  const extracted = extractStartParamFromLocation({
+    initDataUnsafeStartParam: '',
+    initData: '',
+    search: '?startapp=7508911853',
+    hash: tgHash,
+  });
+  assert.equal(extracted, '7508911853');
+
+  const identity = resolveTelegramUserIdentity({
+    tgUser: { id: 999111222, first_name: 'Nora', username: 'nora_farm' },
+    search: '?startapp=ref_7508911853',
+    hash: tgHash,
+  });
+  assert.equal(identity.playerId, 'tg_999111222');
+  assert.equal(identity.isTelegramDetected, true);
+  assert.equal(identity.startParam, 'ref_7508911853');
+  assert.deepEqual(parseStartAppAction(identity.startParam), {
+    actionTab: null,
+    referralCode: '7508911853',
+  });
+});
+
 
 
 
