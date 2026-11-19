@@ -1,0 +1,448 @@
+{
+  "entities": {
+    "PlayerFarmProfile": {
+      "title": "PlayerFarmProfile",
+      "description": "Stores a player's persistent ChickenLand farm state, balances, owned chickens, referral info, daily streak, and stats without requiring Google Login.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "handle": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "photoUrl": { "type": "string", "maxLength": 512 },
+        "avatarColor": { "type": "string", "minLength": 4, "maxLength": 20 },
+        "level": { "type": "number" },
+        "xp": { "type": "number" },
+        "coins": { "type": "number" },
+        "eggs": { "type": "number" },
+        "totalEggsCollected": { "type": "number" },
+        "totalCashEarnedUsd": { "type": "number" },
+        "totalWithdrawnUsd": { "type": "number" },
+        "basketCapacity": { "type": "number" },
+        "basketTierHours": { "type": "number" },
+        "leghornCount": { "type": "number" },
+        "rhodeCount": { "type": "number" },
+        "orpingtonCount": { "type": "number" },
+        "australorpCount": { "type": "number" },
+        "boughtThisWeek": { "type": "number" },
+        "dailyStreak": { "type": "number" },
+        "lastDailyClaimDate": { "type": "string", "maxLength": 20 },
+        "completedTaskIds": { "type": "array" },
+        "claimedPromoCodes": { "type": "array" },
+        "watchedAdsCount": { "type": "number" },
+        "totalAdsWatched": { "type": "number" },
+        "referralCode": { "type": "string", "minLength": 3, "maxLength": 32 },
+        "referredBy": { "type": "string", "maxLength": 64 },
+        "referralActivated": { "type": "boolean" },
+        "referralCount": { "type": "number" },
+        "referralCoinsEarned": { "type": "number" },
+        "firstDepositBonusUsed": { "type": "boolean" },
+        "language": { "type": "string", "minLength": 2, "maxLength": 16 },
+        "lastCollectedAt": { "type": "number" },
+        "createdAtMs": { "type": "number" },
+        "feedBoostUntilMs": { "type": "number" },
+        "lastGoldenEggAtMs": { "type": "number" },
+        "goldenEggsFound": { "type": "number" },
+        "claimedAchievementIds": { "type": "array" },
+        "claimedReferralMilestones": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid", "displayName", "handle", "photoUrl", "avatarColor", "level", "xp",
+        "coins", "eggs", "totalEggsCollected", "totalCashEarnedUsd",
+        "totalWithdrawnUsd", "basketCapacity", "basketTierHours",
+        "leghornCount", "rhodeCount", "orpingtonCount", "australorpCount",
+        "boughtThisWeek", "dailyStreak", "lastDailyClaimDate",
+        "completedTaskIds", "claimedPromoCodes", "watchedAdsCount",
+        "referralCode", "referredBy", "referralActivated", "referralCount", "referralCoinsEarned",
+        "firstDepositBonusUsed", "language", "lastCollectedAt", "createdAtMs",
+        "feedBoostUntilMs", "lastGoldenEggAtMs", "goldenEggsFound",
+        "claimedAchievementIds", "claimedReferralMilestones",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "TransactionEntry": {
+      "title": "TransactionEntry",
+      "description": "Persistent ledger entry for egg collections, tasks, purchases, reinvestments, deposits, referrals, and withdrawals.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["collect", "task", "task_topup", "task_refund", "deposit", "withdraw", "reinvest", "buy_chicken", "upgrade_basket", "promo", "referral", "booster", "coop_fever", "auto_harvest", "golden_egg", "achievement", "season_prize", "admin_adjustment"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "amount": { "type": "number" },
+        "currency": { "type": "string", "enum": ["eggs", "coins"] },
+        "usdValue": { "type": "number" },
+        "status": { "type": "string", "enum": ["completed", "pending", "approved", "rejected"] },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "type", "title", "amount", "currency", "usdValue", "status", "createdAtMs", "createdAt"]
+    },
+    "DepositOrder": {
+      "title": "DepositOrder",
+      "description": "Persistent deposit history item.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "coinsAmount": { "type": "number" },
+        "bonusCoins": { "type": "number" },
+        "usdAmount": { "type": "number" },
+        "network": { "type": "string", "enum": ["USDT_BEP20", "USDT_TON", "GRAM_TON"] },
+        "cryptoAmount": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "depositAddress": { "type": "string", "minLength": 8, "maxLength": 128 },
+        "txHash": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["completed", "pending"] },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "coinsAmount", "bonusCoins", "usdAmount", "network", "cryptoAmount", "depositAddress", "txHash", "status", "createdAtMs", "createdAt"]
+    },
+    "WithdrawalOrder": {
+      "title": "WithdrawalOrder",
+      "description": "Persistent player withdrawal history item awaiting or reviewed by Admin.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "txId": { "type": "string", "maxLength": 64 },
+        "eggsAmount": { "type": "number" },
+        "gramAmount": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "usdValue": { "type": "number" },
+        "walletAddress": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "memo": { "type": "string", "maxLength": 64 },
+        "network": { "type": "string", "enum": ["GRAM_TON"] },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "completed", "processing"] },
+        "adminNote": { "type": "string", "maxLength": 160 },
+        "reviewedAtMs": { "type": "number" },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "eggsAmount", "gramAmount", "usdValue", "walletAddress", "memo", "network", "status", "createdAtMs", "createdAt"]
+    },
+    "WithdrawRequest": {
+      "title": "WithdrawRequest",
+      "description": "Top-level withdrawal queue item reviewed in the Admin Panel.",
+      "type": "object",
+      "properties": {
+        "withdrawalId": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "txId": { "type": "string", "minLength": 3, "maxLength": 64 },
+        "userId": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "handle": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "eggsAmount": { "type": "number" },
+        "gramAmount": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "usdValue": { "type": "number" },
+        "walletAddress": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "memo": { "type": "string", "maxLength": 64 },
+        "network": { "type": "string", "enum": ["GRAM_TON"] },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "adminNote": { "type": "string", "maxLength": 160 },
+        "createdAtMs": { "type": "number" },
+        "reviewedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "withdrawalId", "txId", "userId", "displayName", "handle", "eggsAmount",
+        "gramAmount", "usdValue", "walletAddress", "memo", "network", "status",
+        "adminNote", "createdAtMs", "reviewedAtMs", "createdAt", "updatedAt"
+      ]
+    },
+    "CustomTask": {
+      "title": "CustomTask",
+      "description": "User/Admin-managed task shown in the Tasks tab with optional slot limits.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "category": { "type": "string", "enum": ["social", "daily", "exclusive", "partner", "milestone"] },
+        "title": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "subtitle": { "type": "string", "maxLength": 120 },
+        "rewardCoins": { "type": "number" },
+        "icon": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "actionUrl": { "type": "string", "maxLength": 256 },
+        "totalSlots": { "type": "number" },
+        "claimedCount": { "type": "number" },
+        "creatorUid": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "paidCoins": { "type": "number" },
+        "isActive": { "type": "boolean" },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "category", "title", "rewardCoins", "icon", "actionUrl", "isActive", "createdAtMs", "createdAt"]
+    },
+    "AdsConfig": {
+      "title": "AdsConfig",
+      "description": "Admin-managed ad provider and sponsor banner configuration.",
+      "type": "object",
+      "properties": {
+        "provider": { "type": "string", "enum": ["countdown", "adsgram", "gigapub", "monetag", "custom_sponsor"] },
+        "adsgramBlockId": { "type": "string", "maxLength": 64 },
+        "adsgramTaskBlockId": { "type": "string", "maxLength": 64 },
+        "gigapubProjectId": { "type": "string", "maxLength": 64 },
+        "monetagZoneId": { "type": "string", "maxLength": 64 },
+        "customTitle": { "type": "string", "maxLength": 80 },
+        "customDescription": { "type": "string", "maxLength": 200 },
+        "customUrl": { "type": "string", "maxLength": 256 },
+        "watchSeconds": { "type": "number" },
+        "bannerEnabled": { "type": "boolean" },
+        "bannerTitle": { "type": "string", "maxLength": 80 },
+        "bannerSubtitle": { "type": "string", "maxLength": 160 },
+        "bannerCtaText": { "type": "string", "maxLength": 24 },
+        "bannerUrl": { "type": "string", "maxLength": 256 },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "provider", "adsgramBlockId", "monetagZoneId", "customTitle", "customDescription",
+        "customUrl", "watchSeconds", "bannerEnabled", "bannerTitle", "bannerSubtitle",
+        "bannerCtaText", "bannerUrl", "updatedAtMs", "updatedAt"
+      ]
+    },
+    "ReferralRecord": {
+      "title": "ReferralRecord",
+      "description": "Persistent referral relationship linking referrer to referred player and tracking commissions.",
+      "type": "object",
+      "properties": {
+        "referrerUid": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referredUid": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referredName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "referredHandle": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "status": { "type": "string", "enum": ["pending", "active"] },
+        "coinsEarned": { "type": "number" },
+        "toppedUpUsd": { "type": "number" },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["referrerUid", "referredUid", "referredName", "referredHandle", "status", "coinsEarned", "toppedUpUsd", "createdAtMs", "createdAt"]
+    },
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "Live public leaderboard entry showing buyer points, referral count, eggs balance, and total eggs.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "handle": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "photoUrl": { "type": "string", "maxLength": 512 },
+        "avatarColor": { "type": "string", "minLength": 4, "maxLength": 20 },
+        "referralCode": { "type": "string", "minLength": 3, "maxLength": 32 },
+        "buyerPoints": { "type": "number" },
+        "inviterCount": { "type": "number" },
+        "eggs": { "type": "number" },
+        "totalEggsCollected": { "type": "number" },
+        "chickensCount": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "handle", "photoUrl", "avatarColor", "referralCode", "buyerPoints", "inviterCount", "eggs", "totalEggsCollected", "chickensCount", "updatedAt"]
+    },
+    "DynamicPromoCode": {
+      "title": "DynamicPromoCode",
+      "description": "Admin-managed promo codes stored in Firestore with usage limits and expiration.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 2, "maxLength": 32, "pattern": "^[A-Z0-9_\\-]+$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "coins": { "type": "number" },
+        "maxUses": { "type": "number" },
+        "usedCount": { "type": "number" },
+        "expiresAtMs": { "type": "number" },
+        "isActive": { "type": "boolean" },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "label", "coins", "maxUses", "usedCount", "expiresAtMs", "isActive", "createdAtMs", "createdAt"]
+    },
+    "ProcessedTxHash": {
+      "title": "ProcessedTxHash",
+      "description": "Immutable TON deposit transaction hash registry preventing replay across server restarts.",
+      "type": "object",
+      "properties": {
+        "txHash": { "type": "string", "minLength": 4, "maxLength": 128 },
+        "playerId": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "coinsAmount": { "type": "number" },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["txHash", "playerId", "coinsAmount", "createdAtMs", "createdAt"]
+    },
+    "SeasonConfig": {
+      "title": "SeasonConfig",
+      "description": "Global seasonal leaderboard countdown, prize pool, and past winners.",
+      "type": "object",
+      "properties": {
+        "seasonNumber": { "type": "number" },
+        "title": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "prizePoolCoins": { "type": "number" },
+        "endsAtMs": { "type": "number" },
+        "lastWinners": { "type": "array" },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["seasonNumber", "title", "prizePoolCoins", "endsAtMs", "lastWinners", "updatedAtMs", "updatedAt"]
+    },
+    "ChannelsConfig": {
+      "title": "ChannelsConfig",
+      "description": "Admin-managed required Telegram channels for verification gate.",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "channels": { "type": "array" },
+        "getCodeChannelUrl": { "type": "string", "maxLength": 256 },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["enabled", "channels", "updatedAtMs", "updatedAt"]
+    },
+    "BannedUser": {
+      "title": "BannedUser",
+      "description": "Admin-managed ban record preventing a blocked player ID from accessing game features.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "maxLength": 60 },
+        "handle": { "type": "string", "maxLength": 40 },
+        "reason": { "type": "string", "maxLength": 160 },
+        "bannedBy": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bannedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "handle", "reason", "bannedBy", "bannedAtMs", "createdAt"]
+    },
+    "AdminsConfig": {
+      "title": "AdminsConfig",
+      "description": "Admin-managed registry of extra Co-Admin IDs granted Admin Panel access alongside the Owner Admin ID.",
+      "type": "object",
+      "properties": {
+        "adminIds": { "type": "array" },
+        "admins": { "type": "array" },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["adminIds", "admins", "updatedAtMs", "updatedAt"]
+    },
+    "PayoutTemplateConfig": {
+      "title": "PayoutTemplateConfig",
+      "description": "Admin-editable Telegram DM message template sent to users when their withdrawal is approved.",
+      "type": "object",
+      "properties": {
+        "messageTemplate": { "type": "string", "minLength": 1, "maxLength": 1500 },
+        "buttonText": { "type": "string", "maxLength": 48 },
+        "buttonUrlTemplate": { "type": "string", "maxLength": 256 },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["messageTemplate", "buttonText", "buttonUrlTemplate", "updatedAtMs", "updatedAt"]
+    },
+    "BotSubscriber": {
+      "title": "BotSubscriber",
+      "description": "Telegram user captured via Bot /start webhook/polling or Mini App launch for broadcasts.",
+      "type": "object",
+      "properties": {
+        "chatId": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "maxLength": 40 },
+        "firstName": { "type": "string", "maxLength": 60 },
+        "source": { "type": "string", "enum": ["bot_start", "bot_message", "miniapp"] },
+        "isBotBlocked": { "type": "boolean" },
+        "joinedAtMs": { "type": "number" },
+        "lastSeenAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["chatId", "username", "firstName", "source", "isBotBlocked", "joinedAtMs", "lastSeenAtMs", "updatedAt"]
+    },
+    "TaskPricingConfig": {
+      "title": "TaskPricingConfig",
+      "description": "Admin-editable pricing rules for paid user tasks (min coins, channel check fee, platform fee rate).",
+      "type": "object",
+      "properties": {
+        "minBudgetCoins": { "type": "number" },
+        "channelCheckFeeCoins": { "type": "number" },
+        "platformFeeRate": { "type": "number" },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["minBudgetCoins", "channelCheckFeeCoins", "platformFeeRate", "updatedAtMs", "updatedAt"]
+    },
+    "SystemResetConfig": {
+      "title": "SystemResetConfig",
+      "description": "Tracks Admin system data reset epochs so active clients clear stale caches and sync cleanly.",
+      "type": "object",
+      "properties": {
+        "resetEpochMs": { "type": "number" },
+        "resetCount": { "type": "number" },
+        "resetBy": { "type": "string", "maxLength": 64 },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["resetEpochMs", "resetCount", "resetBy", "updatedAtMs", "updatedAt"]
+    },
+    "MaintenanceConfig": {
+      "title": "MaintenanceConfig",
+      "description": "Admin-controlled Maintenance Mode flag and English maintenance message shown to non-admin users.",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "estimatedReturn": { "type": "string", "maxLength": 80 },
+        "updatedBy": { "type": "string", "maxLength": 64 },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["enabled", "title", "message", "estimatedReturn", "updatedBy", "updatedAtMs", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/players/{playerId}": {
+      "schema": { "$ref": "#/entities/PlayerFarmProfile" },
+      "description": "Persistent player farm profile without requiring Google login."
+    },
+    "/players/{playerId}/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/TransactionEntry" },
+      "description": "Transaction ledger (pending withdrawal entries can update to approved/rejected)."
+    },
+    "/players/{playerId}/deposits/{depositId}": {
+      "schema": { "$ref": "#/entities/DepositOrder" },
+      "description": "Immutable deposit history."
+    },
+    "/players/{playerId}/withdrawals/{withdrawalId}": {
+      "schema": { "$ref": "#/entities/WithdrawalOrder" },
+      "description": "Player withdrawal history updated when Admin approves or rejects."
+    },
+    "/players/{playerId}/referrals/{referredUid}": {
+      "schema": { "$ref": "#/entities/ReferralRecord" },
+      "description": "Real referral records for a player."
+    },
+    "/leaderboard/{playerId}": {
+      "schema": { "$ref": "#/entities/LeaderboardEntry" },
+      "description": "Live public leaderboard tracking buyer points, referrals, and eggs."
+    },
+    "/withdraw_requests/{withdrawalId}": {
+      "schema": { "$ref": "#/entities/WithdrawRequest" },
+      "description": "Admin withdrawal queue synced with player withdrawals."
+    },
+    "/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/CustomTask" },
+      "description": "Custom tasks created in Admin Panel."
+    },
+    "/promo_codes/{codeId}": {
+      "schema": { "$ref": "#/entities/DynamicPromoCode" },
+      "description": "Dynamic promo codes managed by Admin."
+    },
+    "/processed_tx_hashes/{txKey}": {
+      "schema": { "$ref": "#/entities/ProcessedTxHash" },
+      "description": "Persistent immutable TON transaction hash deduplication registry."
+    },
+    "/app_config/{configId}": {
+      "schema": { "$ref": "#/entities/AdsConfig" },
+      "description": "Global app configuration for ads, seasonal leaderboard, required Telegram channels, admins, payout DM template, paid task pricing, system reset epoch, and maintenance mode."
+    },
+    "/banned_users/{playerId}": {
+      "schema": { "$ref": "#/entities/BannedUser" },
+      "description": "Admin-managed registry of blocked/banned player IDs prevented from accessing game features."
+    },
+    "/bot_subscribers/{chatId}": {
+      "schema": { "$ref": "#/entities/BotSubscriber" },
+      "description": "Telegram Bot subscriber registry populated from Bot /start interactions and Mini App logins."
+    }
+  }
+}
+

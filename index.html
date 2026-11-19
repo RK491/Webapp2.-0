@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Alpha Gram — Idle Poultry Economy &amp; Wallet</title>
+    <meta name="theme-color" content="#F59E0B" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Alpha Gram" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <meta name="description" content="Build your Alpha Gram poultry farm, collect eggs 24/7, earn +150 coins per referral plus 5% deposit commission, complete daily tasks, and manage deposits and withdrawals with cloud persistence." />
+    <meta property="og:title" content="Alpha Gram — Idle Poultry Economy &amp; Wallet" />
+    <meta property="og:description" content="Build your Alpha Gram poultry farm, collect eggs 24/7, earn referral rewards and 5% deposit share, and track deposits and withdrawals." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script>
+      try {
+        if (localStorage.getItem('chickenland_theme_v1') === 'dark') {
+          document.documentElement.classList.add('dark');
+          document.documentElement.style.colorScheme = 'dark';
+        }
+        if ('caches' in window) {
+          caches.delete('pages-network-first').catch(function () {});
+        }
+        if ('serviceWorker' in navigator) {
+          var swReloaded = false;
+          navigator.serviceWorker.addEventListener('controllerchange', function () {
+            if (swReloaded) return;
+            try {
+              if (sessionStorage.getItem('alphagram_sw_reloaded') === '1') return;
+              sessionStorage.setItem('alphagram_sw_reloaded', '1');
+            } catch (e) {}
+            swReloaded = true;
+            window.location.reload();
+          });
+          navigator.serviceWorker.getRegistrations().then(function (regs) {
+            for (var i = 0; i < regs.length; i++) {
+              regs[i].update().catch(function () {});
+            }
+          }).catch(function () {});
+        }
+      } catch (e) {}
+    </script>
+  </head>
+  <body class="bg-[#F7F6F2] text-stone-900 dark:bg-[#0F1115] dark:text-stone-100 antialiased selection:bg-amber-200 selection:text-amber-950">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

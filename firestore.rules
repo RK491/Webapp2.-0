@@ -1,0 +1,783 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 3 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAdminActorId(id) {
+      return id in ['tg_7508911853', '7508911853']
+        || (
+          exists(/databases/$(database)/documents/app_config/admins)
+          && get(/databases/$(database)/documents/app_config/admins).data.adminIds is list
+          && id in get(/databases/$(database)/documents/app_config/admins).data.adminIds
+        );
+    }
+
+    function isBoundedStringList(arr, maxLen) {
+      return arr is list && arr.size() <= maxLen && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 64));
+    }
+
+    function isBoundedNumberList(arr, maxLen) {
+      return arr is list && arr.size() <= maxLen && (arr.size() == 0 || arr[0] is number);
+    }
+
+
+    function isValidPlayerProfileKeys(data) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'handle', 'photoUrl', 'avatarColor', 'level', 'xp',
+          'coins', 'eggs', 'totalEggsCollected', 'totalCashEarnedUsd',
+          'totalWithdrawnUsd', 'basketCapacity', 'basketTierHours',
+          'leghornCount', 'rhodeCount', 'orpingtonCount', 'australorpCount',
+          'boughtThisWeek', 'dailyStreak', 'lastDailyClaimDate',
+          'completedTaskIds', 'claimedPromoCodes', 'watchedAdsCount',
+          'referralCode', 'referredBy', 'referralActivated', 'referralCount', 'referralCoinsEarned',
+          'firstDepositBonusUsed', 'language', 'lastCollectedAt', 'createdAtMs',
+          'feedBoostUntilMs', 'lastGoldenEggAtMs', 'goldenEggsFound',
+          'claimedAchievementIds', 'claimedReferralMilestones',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'handle', 'photoUrl', 'avatarColor', 'level', 'xp',
+          'coins', 'eggs', 'totalEggsCollected', 'totalCashEarnedUsd',
+          'totalWithdrawnUsd', 'basketCapacity', 'basketTierHours',
+          'leghornCount', 'rhodeCount', 'orpingtonCount', 'australorpCount',
+          'boughtThisWeek', 'dailyStreak', 'lastDailyClaimDate',
+          'completedTaskIds', 'claimedPromoCodes', 'watchedAdsCount', 'totalAdsWatched',
+          'referralCode', 'referredBy', 'referralActivated', 'referralCount', 'referralCoinsEarned',
+          'firstDepositBonusUsed', 'language', 'lastCollectedAt', 'createdAtMs',
+          'feedBoostUntilMs', 'lastGoldenEggAtMs', 'goldenEggsFound',
+          'claimedAchievementIds', 'claimedReferralMilestones',
+          'createdAt', 'updatedAt'
+        ]);
+    }
+
+    function isValidPlayerProfileIdentity(data, playerId) {
+      return isValidId(data.uid)
+        && data.uid == playerId
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60
+        && data.handle is string && data.handle.size() >= 1 && data.handle.size() <= 40
+        && data.photoUrl is string && data.photoUrl.size() <= 512
+        && data.avatarColor is string && data.avatarColor.size() >= 4 && data.avatarColor.size() <= 20
+        && data.referralCode is string && data.referralCode.size() >= 3 && data.referralCode.size() <= 32
+        && data.referredBy is string && data.referredBy.size() <= 64
+        && data.referralActivated is bool
+        && data.language is string && data.language.size() >= 2 && data.language.size() <= 16
+        && data.createdAtMs is number && data.createdAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPlayerProfileEconomy(data) {
+      return data.level is number && data.level >= 1 && data.level <= 999
+        && data.xp is number && data.xp >= 0 && data.xp <= 100000000
+        && data.coins is number && data.coins >= -100000000 && data.coins <= 100000000
+        && data.eggs is number && data.eggs >= 0 && data.eggs <= 100000000
+        && data.totalEggsCollected is number && data.totalEggsCollected >= 0 && data.totalEggsCollected <= 500000000
+        && data.totalCashEarnedUsd is number && data.totalCashEarnedUsd >= 0 && data.totalCashEarnedUsd <= 10000000
+        && data.totalWithdrawnUsd is number && data.totalWithdrawnUsd >= 0 && data.totalWithdrawnUsd <= 10000000
+        && data.basketCapacity is number && data.basketCapacity >= 300 && data.basketCapacity <= 1000000
+        && data.basketTierHours is number && data.basketTierHours >= 8 && data.basketTierHours <= 72
+        && data.leghornCount is number && data.leghornCount >= 0 && data.leghornCount <= 100000
+        && data.rhodeCount is number && data.rhodeCount >= 0 && data.rhodeCount <= 100000
+        && data.orpingtonCount is number && data.orpingtonCount >= 0 && data.orpingtonCount <= 100000
+        && data.australorpCount is number && data.australorpCount >= 0 && data.australorpCount <= 100000
+        && data.boughtThisWeek is number && data.boughtThisWeek >= 0 && data.boughtThisWeek <= 100000;
+    }
+
+    function isValidPlayerProfileProgress(data) {
+      return data.dailyStreak is number && data.dailyStreak >= 0 && data.dailyStreak <= 7
+        && data.lastDailyClaimDate is string && data.lastDailyClaimDate.size() <= 20
+        && isBoundedStringList(data.completedTaskIds, 50)
+        && isBoundedStringList(data.claimedPromoCodes, 50)
+        && data.watchedAdsCount is number && data.watchedAdsCount >= 0 && data.watchedAdsCount <= 10
+        && (!('totalAdsWatched' in data) || (data.totalAdsWatched is number && data.totalAdsWatched >= 0 && data.totalAdsWatched <= 10000000))
+        && data.referralCount is number && data.referralCount >= 0 && data.referralCount <= 1000000
+        && data.referralCoinsEarned is number && data.referralCoinsEarned >= 0 && data.referralCoinsEarned <= 100000000
+        && data.firstDepositBonusUsed is bool
+        && data.lastCollectedAt is number && data.lastCollectedAt >= 0
+        && data.feedBoostUntilMs is number && data.feedBoostUntilMs >= 0
+        && data.lastGoldenEggAtMs is number && data.lastGoldenEggAtMs >= 0
+        && data.goldenEggsFound is number && data.goldenEggsFound >= 0 && data.goldenEggsFound <= 10000000
+        && isBoundedStringList(data.claimedAchievementIds, 50)
+        && isBoundedNumberList(data.claimedReferralMilestones, 20);
+    }
+
+    function isValidPlayerFarmProfile(data, playerId) {
+      return isValidPlayerProfileKeys(data)
+        && isValidPlayerProfileIdentity(data, playerId)
+        && isValidPlayerProfileEconomy(data)
+        && isValidPlayerProfileProgress(data);
+    }
+
+    function isValidTransaction(data, playerId) {
+      return data.keys().hasAll([
+          'userId', 'type', 'title', 'amount', 'currency',
+          'usdValue', 'status', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'type', 'title', 'amount', 'currency',
+          'usdValue', 'status', 'createdAtMs', 'createdAt'
+        ])
+        && isValidId(data.userId)
+        && data.userId == playerId
+        && data.type in ['collect', 'task', 'task_topup', 'task_refund', 'deposit', 'withdraw', 'reinvest', 'buy_chicken', 'upgrade_basket', 'promo', 'referral', 'booster', 'coop_fever', 'auto_harvest', 'golden_egg', 'achievement', 'season_prize', 'admin_adjustment']
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 80
+        && data.amount is number
+        && data.currency in ['eggs', 'coins']
+        && data.usdValue is number && data.usdValue >= 0
+        && data.status in ['completed', 'pending', 'approved', 'rejected']
+        && data.createdAtMs is number && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidDeposit(data, playerId) {
+      return data.keys().hasAll([
+          'userId', 'coinsAmount', 'bonusCoins', 'usdAmount',
+          'network', 'cryptoAmount', 'depositAddress', 'txHash',
+          'status', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'coinsAmount', 'bonusCoins', 'usdAmount',
+          'network', 'cryptoAmount', 'depositAddress', 'txHash',
+          'status', 'createdAtMs', 'createdAt'
+        ])
+        && isValidId(data.userId)
+        && data.userId == playerId
+        && data.coinsAmount is number && data.coinsAmount >= 1000 && data.coinsAmount <= 15000
+        && data.bonusCoins is number && data.bonusCoins >= 0
+        && data.usdAmount is number && data.usdAmount >= 0.1
+        && data.network in ['USDT_BEP20', 'USDT_TON', 'GRAM_TON']
+        && data.cryptoAmount is string && data.cryptoAmount.size() >= 1 && data.cryptoAmount.size() <= 40
+        && data.depositAddress is string && data.depositAddress.size() >= 8 && data.depositAddress.size() <= 128
+        && data.txHash is string && data.txHash.size() <= 128
+        && data.status in ['completed', 'pending']
+        && data.createdAtMs is number && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidWithdrawal(data, playerId) {
+      return data.keys().hasAll([
+          'userId', 'eggsAmount', 'gramAmount', 'usdValue',
+          'walletAddress', 'memo', 'network', 'status',
+          'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'txId', 'eggsAmount', 'gramAmount', 'usdValue',
+          'walletAddress', 'memo', 'network', 'status',
+          'adminNote', 'reviewedAtMs', 'createdAtMs', 'createdAt'
+        ])
+        && isValidId(data.userId)
+        && data.userId == playerId
+        && data.eggsAmount is number && data.eggsAmount >= 100
+        && data.gramAmount is string && data.gramAmount.size() >= 1 && data.gramAmount.size() <= 40
+        && data.usdValue is number && data.usdValue >= 0
+        && data.walletAddress is string && data.walletAddress.size() >= 6 && data.walletAddress.size() <= 128
+        && data.memo is string && data.memo.size() <= 64
+        && data.network == 'GRAM_TON'
+        && data.status in ['pending', 'approved', 'rejected', 'completed', 'processing']
+        && data.createdAtMs is number && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidWithdrawRequest(data, withdrawalId) {
+      return data.keys().hasAll([
+          'withdrawalId', 'txId', 'userId', 'displayName', 'handle',
+          'eggsAmount', 'gramAmount', 'usdValue', 'walletAddress', 'memo',
+          'network', 'status', 'adminNote', 'createdAtMs', 'reviewedAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'withdrawalId', 'txId', 'userId', 'displayName', 'handle',
+          'eggsAmount', 'gramAmount', 'usdValue', 'walletAddress', 'memo',
+          'network', 'status', 'adminNote', 'createdAtMs', 'reviewedAtMs',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.withdrawalId)
+        && data.withdrawalId == withdrawalId
+        && isValidId(data.txId)
+        && isValidId(data.userId)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60
+        && data.handle is string && data.handle.size() >= 1 && data.handle.size() <= 40
+        && data.eggsAmount is number && data.eggsAmount >= 100
+        && data.gramAmount is string && data.gramAmount.size() >= 1 && data.gramAmount.size() <= 40
+        && data.usdValue is number && data.usdValue >= 0
+        && data.walletAddress is string && data.walletAddress.size() >= 6 && data.walletAddress.size() <= 128
+        && data.memo is string && data.memo.size() <= 64
+        && data.network == 'GRAM_TON'
+        && data.status in ['pending', 'approved', 'rejected']
+        && data.adminNote is string && data.adminNote.size() <= 160
+        && data.createdAtMs is number && data.createdAtMs >= 0
+        && data.reviewedAtMs is number && data.reviewedAtMs >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCustomTask(data, taskId) {
+      return data.keys().hasAll([
+          'id', 'category', 'title', 'rewardCoins', 'icon',
+          'actionUrl', 'isActive', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'category', 'title', 'subtitle', 'rewardCoins', 'icon',
+          'actionUrl', 'totalSlots', 'claimedCount', 'creatorUid', 'paidCoins',
+          'isActive', 'createdAtMs', 'createdAt'
+        ])
+        && isValidId(data.id)
+        && data.id == taskId
+        && data.category in ['social', 'daily', 'exclusive', 'partner', 'milestone']
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 80
+        && (!('subtitle' in data) || (data.subtitle is string && data.subtitle.size() <= 120))
+        && data.rewardCoins is number && data.rewardCoins >= 1 && data.rewardCoins <= 1000000
+        && data.icon is string && data.icon.size() >= 1 && data.icon.size() <= 24
+        && data.actionUrl is string && data.actionUrl.size() <= 256
+        && (!('totalSlots' in data) || (data.totalSlots is number && data.totalSlots >= 0 && data.totalSlots <= 1000000))
+        && (!('claimedCount' in data) || (data.claimedCount is number && data.claimedCount >= 0 && data.claimedCount <= 1000000))
+        && (!('creatorUid' in data) || isValidId(data.creatorUid))
+        && (!('paidCoins' in data) || (data.paidCoins is number && data.paidCoins >= 0 && data.paidCoins <= 100000000))
+        && (!('creatorUid' in data) || (
+          data.rewardCoins >= 50
+          && 'totalSlots' in data && data.totalSlots >= 1
+          && 'paidCoins' in data && data.paidCoins >= 100
+        ))
+        && data.isActive is bool
+        && data.createdAtMs is number && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAdsConfig(data) {
+      return data.keys().hasAll([
+          'provider', 'adsgramBlockId', 'monetagZoneId', 'customTitle',
+          'customDescription', 'customUrl', 'watchSeconds', 'bannerEnabled',
+          'bannerTitle', 'bannerSubtitle', 'bannerCtaText', 'bannerUrl',
+          'updatedAtMs', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'provider', 'adsgramBlockId', 'adsgramTaskBlockId', 'gigapubProjectId', 'monetagZoneId', 'customTitle',
+          'customDescription', 'customUrl', 'watchSeconds', 'bannerEnabled',
+          'bannerTitle', 'bannerSubtitle', 'bannerCtaText', 'bannerUrl',
+          'updatedAtMs', 'updatedAt'
+        ])
+        && data.provider in ['countdown', 'adsgram', 'gigapub', 'monetag', 'custom_sponsor']
+        && data.adsgramBlockId is string && data.adsgramBlockId.size() <= 64
+        && (!('adsgramTaskBlockId' in data) || (data.adsgramTaskBlockId is string && data.adsgramTaskBlockId.size() <= 64))
+        && (!('gigapubProjectId' in data) || (data.gigapubProjectId is string && data.gigapubProjectId.size() <= 64))
+        && data.monetagZoneId is string && data.monetagZoneId.size() <= 64
+        && data.customTitle is string && data.customTitle.size() <= 80
+        && data.customDescription is string && data.customDescription.size() <= 200
+        && data.customUrl is string && data.customUrl.size() <= 256
+        && data.watchSeconds is number && data.watchSeconds >= 3 && data.watchSeconds <= 60
+        && data.bannerEnabled is bool
+        && data.bannerTitle is string && data.bannerTitle.size() <= 80
+        && data.bannerSubtitle is string && data.bannerSubtitle.size() <= 160
+        && data.bannerCtaText is string && data.bannerCtaText.size() <= 24
+        && data.bannerUrl is string && data.bannerUrl.size() <= 256
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPromoCode(data, codeId) {
+      return data.keys().hasAll([
+          'code', 'label', 'coins', 'maxUses', 'usedCount',
+          'expiresAtMs', 'isActive', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'code', 'label', 'coins', 'maxUses', 'usedCount',
+          'expiresAtMs', 'isActive', 'createdAtMs', 'createdAt'
+        ])
+        && isValidId(data.code)
+        && data.code == codeId
+        && data.code.size() >= 2 && data.code.size() <= 32
+        && data.label is string && data.label.size() >= 1 && data.label.size() <= 60
+        && data.coins is number && data.coins >= 1 && data.coins <= 1000000
+        && data.maxUses is number && data.maxUses >= 0 && data.maxUses <= 1000000
+        && data.usedCount is number && data.usedCount >= 0
+        && data.expiresAtMs is number && data.expiresAtMs >= 0
+        && data.isActive is bool
+        && data.createdAtMs is number && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidProcessedTxHash(data, txKey) {
+      return data.keys().hasAll([
+          'txHash', 'playerId', 'coinsAmount', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'txHash', 'playerId', 'coinsAmount', 'createdAtMs', 'createdAt'
+        ])
+        && isValidId(txKey)
+        && data.txHash is string && data.txHash.size() >= 4 && data.txHash.size() <= 128
+        && isValidId(data.playerId)
+        && data.coinsAmount is number && data.coinsAmount >= 1000 && data.coinsAmount <= 15000
+        && data.createdAtMs is number && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSeasonConfig(data) {
+      return data.keys().hasAll([
+          'seasonNumber', 'title', 'prizePoolCoins', 'endsAtMs',
+          'lastWinners', 'updatedAtMs', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'seasonNumber', 'title', 'prizePoolCoins', 'endsAtMs',
+          'lastWinners', 'updatedAtMs', 'updatedAt'
+        ])
+        && data.seasonNumber is number && data.seasonNumber >= 1 && data.seasonNumber <= 9999
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 80
+        && data.prizePoolCoins is number && data.prizePoolCoins >= 0 && data.prizePoolCoins <= 10000000
+        && data.endsAtMs is number && data.endsAtMs >= 0
+        && data.lastWinners is list && data.lastWinners.size() <= 15
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChannelsConfig(data) {
+      return data.keys().hasAll(['enabled', 'channels', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['enabled', 'channels', 'getCodeChannelUrl', 'updatedAtMs', 'updatedAt'])
+        && data.enabled is bool
+        && (!('getCodeChannelUrl' in data) || (data.getCodeChannelUrl is string && data.getCodeChannelUrl.size() <= 256))
+        && data.channels is list
+        && data.channels.size() <= 10
+        && (data.channels.size() == 0 || (
+          data.channels[0] is map
+          && data.channels[0].keys().hasAll(['id', 'handle', 'title', 'description', 'url', 'enabled'])
+          && data.channels[0].keys().hasOnly(['id', 'handle', 'title', 'description', 'url', 'enabled'])
+          && data.channels[0].id is string && data.channels[0].id.size() >= 1 && data.channels[0].id.size() <= 48
+          && data.channels[0].handle is string && data.channels[0].handle.size() >= 2 && data.channels[0].handle.size() <= 64
+          && data.channels[0].title is string && data.channels[0].title.size() <= 60
+          && data.channels[0].description is string && data.channels[0].description.size() <= 140
+          && data.channels[0].url is string && data.channels[0].url.size() <= 256
+          && data.channels[0].enabled is bool
+        ))
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminsConfig(data) {
+      return data.keys().hasAll(['adminIds', 'admins', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['adminIds', 'admins', 'updatedAtMs', 'updatedAt'])
+        && isBoundedStringList(data.adminIds, 30)
+        && data.admins is list
+        && data.admins.size() <= 30
+        && (data.admins.size() == 0 || (
+          data.admins[0] is map
+          && data.admins[0].keys().hasAll(['uid', 'displayName', 'handle', 'addedBy', 'addedAtMs'])
+          && data.admins[0].keys().hasOnly(['uid', 'displayName', 'handle', 'addedBy', 'addedAtMs'])
+          && isValidId(data.admins[0].uid)
+          && data.admins[0].displayName is string && data.admins[0].displayName.size() <= 60
+          && data.admins[0].handle is string && data.admins[0].handle.size() <= 40
+          && isValidId(data.admins[0].addedBy)
+          && data.admins[0].addedAtMs is number && data.admins[0].addedAtMs >= 0
+        ))
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPayoutTemplateConfig(data) {
+      return data.keys().hasAll(['messageTemplate', 'buttonText', 'buttonUrlTemplate', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['messageTemplate', 'buttonText', 'buttonUrlTemplate', 'updatedAtMs', 'updatedAt'])
+        && data.messageTemplate is string && data.messageTemplate.size() >= 1 && data.messageTemplate.size() <= 1500
+        && data.buttonText is string && data.buttonText.size() <= 48
+        && data.buttonUrlTemplate is string && data.buttonUrlTemplate.size() <= 256
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTaskPricingConfig(data) {
+      return data.keys().hasAll(['minBudgetCoins', 'channelCheckFeeCoins', 'platformFeeRate', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['minBudgetCoins', 'channelCheckFeeCoins', 'platformFeeRate', 'updatedAtMs', 'updatedAt'])
+        && data.minBudgetCoins is number && data.minBudgetCoins >= 1000 && data.minBudgetCoins <= 1000000
+        && data.channelCheckFeeCoins is number && data.channelCheckFeeCoins >= 0 && data.channelCheckFeeCoins <= 500000
+        && data.platformFeeRate is number && data.platformFeeRate >= 0 && data.platformFeeRate <= 0.5
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSystemResetConfig(data) {
+      return data.keys().hasAll(['resetEpochMs', 'resetCount', 'resetBy', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['resetEpochMs', 'resetCount', 'resetBy', 'updatedAtMs', 'updatedAt'])
+        && data.resetEpochMs is number && data.resetEpochMs >= 0
+        && data.resetCount is number && data.resetCount >= 0
+        && data.resetBy is string && data.resetBy.size() <= 64
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMaintenanceConfig(data) {
+      return data.keys().hasAll(['enabled', 'title', 'message', 'estimatedReturn', 'updatedBy', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['enabled', 'title', 'message', 'estimatedReturn', 'updatedBy', 'updatedAtMs', 'updatedAt'])
+        && data.enabled is bool
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 80
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 400
+        && data.estimatedReturn is string && data.estimatedReturn.size() <= 80
+        && data.updatedBy is string && data.updatedBy.size() <= 64
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBotSubscriber(data, chatId) {
+      return data.keys().hasAll(['chatId', 'username', 'firstName', 'source', 'isBotBlocked', 'joinedAtMs', 'lastSeenAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['chatId', 'username', 'firstName', 'source', 'isBotBlocked', 'joinedAtMs', 'lastSeenAtMs', 'updatedAt'])
+        && isValidId(data.chatId)
+        && data.chatId == chatId
+        && data.chatId.size() <= 32
+        && data.username is string && data.username.size() <= 40
+        && data.firstName is string && data.firstName.size() <= 60
+        && data.source in ['bot_start', 'bot_message', 'miniapp']
+        && data.isBotBlocked is bool
+        && data.joinedAtMs is number && data.joinedAtMs >= 0
+        && data.lastSeenAtMs is number && data.lastSeenAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidReferral(data, playerId, referredUid) {
+      return data.keys().hasAll([
+          'referrerUid', 'referredUid', 'referredName', 'referredHandle',
+          'status', 'coinsEarned', 'toppedUpUsd', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'referrerUid', 'referredUid', 'referredName', 'referredHandle',
+          'status', 'coinsEarned', 'toppedUpUsd', 'createdAtMs', 'createdAt'
+        ])
+        && isValidId(data.referrerUid)
+        && isValidId(data.referredUid)
+        && data.referrerUid == playerId
+        && data.referredUid == referredUid
+        && data.referrerUid != data.referredUid
+        && data.referredName is string && data.referredName.size() >= 1 && data.referredName.size() <= 60
+        && data.referredHandle is string && data.referredHandle.size() >= 1 && data.referredHandle.size() <= 40
+        && data.status in ['pending', 'active']
+        && data.coinsEarned is number && data.coinsEarned >= 0
+        && data.toppedUpUsd is number && data.toppedUpUsd >= 0
+        && data.createdAtMs is number && data.createdAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidLeaderboard(data, playerId) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'handle', 'photoUrl', 'avatarColor', 'referralCode',
+          'buyerPoints', 'inviterCount', 'eggs', 'totalEggsCollected',
+          'chickensCount', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'handle', 'photoUrl', 'avatarColor', 'referralCode',
+          'buyerPoints', 'inviterCount', 'eggs', 'totalEggsCollected',
+          'chickensCount', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == playerId
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60
+        && data.handle is string && data.handle.size() >= 1 && data.handle.size() <= 40
+        && data.photoUrl is string && data.photoUrl.size() <= 512
+        && data.avatarColor is string && data.avatarColor.size() >= 4 && data.avatarColor.size() <= 20
+        && data.referralCode is string && data.referralCode.size() >= 3 && data.referralCode.size() <= 32
+        && data.buyerPoints is number && data.buyerPoints >= 0 && data.buyerPoints <= 10000000
+        && data.inviterCount is number && data.inviterCount >= 0 && data.inviterCount <= 1000000
+        && data.eggs is number && data.eggs >= 0 && data.eggs <= 100000000
+        && data.totalEggsCollected is number && data.totalEggsCollected >= 0 && data.totalEggsCollected <= 500000000
+        && data.chickensCount is number && data.chickensCount >= 0 && data.chickensCount <= 1000000
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBannedUser(data, playerId) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'handle', 'reason', 'bannedBy', 'bannedAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'handle', 'reason', 'bannedBy', 'bannedAtMs', 'createdAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == playerId
+        && !isAdminActorId(data.uid)
+        && data.displayName is string && data.displayName.size() <= 60
+        && data.handle is string && data.handle.size() <= 40
+        && data.reason is string && data.reason.size() <= 160
+        && isValidId(data.bannedBy)
+        && isAdminActorId(data.bannedBy)
+        && data.bannedAtMs is number && data.bannedAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
+    match /players/{playerId} {
+      allow get: if isValidId(playerId);
+      allow list: if request.query.limit != null && request.query.limit <= 50;
+      allow create: if isValidId(playerId)
+        && isValidPlayerFarmProfile(incoming(), playerId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(playerId)
+        && isValidPlayerFarmProfile(incoming(), playerId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().createdAtMs == existing().createdAtMs
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Player Farm & Referral Sync
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName', 'handle', 'photoUrl', 'avatarColor', 'level', 'xp',
+            'coins', 'eggs', 'totalEggsCollected', 'totalCashEarnedUsd',
+            'totalWithdrawnUsd', 'basketCapacity', 'basketTierHours',
+            'leghornCount', 'rhodeCount', 'orpingtonCount', 'australorpCount',
+            'boughtThisWeek', 'dailyStreak', 'lastDailyClaimDate',
+            'completedTaskIds', 'claimedPromoCodes', 'watchedAdsCount', 'totalAdsWatched',
+            'referredBy', 'referralActivated', 'referralCount', 'referralCoinsEarned',
+            'firstDepositBonusUsed', 'language', 'lastCollectedAt',
+            'feedBoostUntilMs', 'lastGoldenEggAtMs', 'goldenEggsFound',
+            'claimedAchievementIds', 'claimedReferralMilestones', 'updatedAt'
+          ])
+        );
+      allow delete: if false;
+
+      match /transactions/{txId} {
+        allow get: if isValidId(playerId) && isValidId(txId);
+        allow list: if isValidId(playerId) && request.query.limit != null && request.query.limit <= 60;
+        allow create: if isValidId(playerId)
+          && isValidId(txId)
+          && isValidTransaction(incoming(), playerId)
+          && incoming().createdAt == request.time
+          && (
+            exists(/databases/$(database)/documents/players/$(playerId))
+            || existsAfter(/databases/$(database)/documents/players/$(playerId))
+          );
+        allow update: if isValidId(playerId)
+          && isValidId(txId)
+          && isValidTransaction(incoming(), playerId)
+          && existing().status == 'pending'
+          && incoming().status in ['approved', 'rejected']
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['status']);
+        allow delete: if false;
+      }
+
+      match /deposits/{depositId} {
+        allow get: if isValidId(playerId) && isValidId(depositId);
+        allow list: if isValidId(playerId) && request.query.limit != null && request.query.limit <= 40;
+        allow create: if isValidId(playerId)
+          && isValidId(depositId)
+          && isValidDeposit(incoming(), playerId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/players/$(playerId));
+        allow update, delete: if false;
+      }
+
+      match /withdrawals/{withdrawalId} {
+        allow get: if isValidId(playerId) && isValidId(withdrawalId);
+        allow list: if isValidId(playerId) && request.query.limit != null && request.query.limit <= 40;
+        allow create: if isValidId(playerId)
+          && isValidId(withdrawalId)
+          && isValidWithdrawal(incoming(), playerId)
+          && incoming().status == 'pending'
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/players/$(playerId))
+          && !exists(/databases/$(database)/documents/banned_users/$(playerId));
+        allow update: if isValidId(playerId)
+          && isValidId(withdrawalId)
+          && isValidWithdrawal(incoming(), playerId)
+          && existing().status in ['pending', 'processing']
+          && incoming().status in ['approved', 'rejected']
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminNote', 'reviewedAtMs']);
+        allow delete: if false;
+      }
+
+      match /referrals/{referredUid} {
+        allow get: if isValidId(playerId) && isValidId(referredUid);
+        allow list: if isValidId(playerId) && request.query.limit != null && request.query.limit <= 50;
+        allow create: if isValidId(playerId)
+          && isValidId(referredUid)
+          && isValidReferral(incoming(), playerId, referredUid)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/players/$(playerId));
+        allow update: if isValidId(playerId)
+          && isValidId(referredUid)
+          && isValidReferral(incoming(), playerId, referredUid)
+          && incoming().createdAt == existing().createdAt
+          && (
+            // Action: Activate pending referral on 1st chicken purchase
+            (
+              existing().status == 'pending'
+              && incoming().status == 'active'
+              && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'coinsEarned'])
+            )
+            ||
+            // Action: Deposit 5% referral commission
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'coinsEarned', 'toppedUpUsd'])
+          );
+        allow delete: if isValidId(playerId) && isValidId(referredUid);
+      }
+    }
+
+    match /leaderboard/{playerId} {
+      allow get: if isValidId(playerId);
+      allow list: if request.query.limit != null && request.query.limit <= 50;
+      allow create: if isValidId(playerId)
+        && isValidLeaderboard(incoming(), playerId)
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(playerId)
+        && isValidLeaderboard(incoming(), playerId)
+        && incoming().uid == existing().uid
+        && incoming().referralCode == existing().referralCode
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'handle', 'photoUrl', 'avatarColor',
+          'buyerPoints', 'inviterCount', 'eggs', 'totalEggsCollected',
+          'chickensCount', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /withdraw_requests/{withdrawalId} {
+      allow get: if isValidId(withdrawalId);
+      allow list: if request.query.limit != null && request.query.limit <= 100;
+      allow create: if isValidId(withdrawalId)
+        && isValidWithdrawRequest(incoming(), withdrawalId)
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/players/$(request.resource.data.userId))
+        && !exists(/databases/$(database)/documents/banned_users/$(request.resource.data.userId));
+      allow update: if isValidId(withdrawalId)
+        && isValidWithdrawRequest(incoming(), withdrawalId)
+        && existing().status == 'pending'
+        && incoming().status in ['approved', 'rejected']
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminNote', 'reviewedAtMs', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /tasks/{taskId} {
+      allow get: if isValidId(taskId);
+      allow list: if request.query.limit != null && request.query.limit <= 100;
+      allow create: if isValidId(taskId)
+        && isValidCustomTask(incoming(), taskId)
+        && (!('claimedCount' in incoming()) || incoming().claimedCount == 0)
+        && (!('creatorUid' in incoming()) || exists(/databases/$(database)/documents/players/$(request.resource.data.creatorUid)))
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(taskId)
+        && isValidCustomTask(incoming(), taskId)
+        && incoming().createdAt == existing().createdAt
+        && (
+          // Action: Admin pause/resume or Sponsor Top-Up / Refund (rewardCoins, actionUrl, title, category remain immutable)
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['isActive', 'subtitle', 'totalSlots'])
+            && incoming().rewardCoins == existing().rewardCoins
+            && incoming().actionUrl == existing().actionUrl
+            && incoming().title == existing().title
+            && incoming().category == existing().category
+            && incoming().icon == existing().icon
+          )
+          ||
+          // Action: Player slot claim increment
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['claimedCount'])
+            && (
+              (!('claimedCount' in existing()) && incoming().claimedCount == 1)
+              || ('claimedCount' in existing() && incoming().claimedCount == existing().claimedCount + 1)
+            )
+            && (
+              !('totalSlots' in existing())
+              || existing().totalSlots == 0
+              || incoming().claimedCount <= existing().totalSlots
+            )
+          )
+        );
+      allow delete: if isValidId(taskId);
+    }
+
+    match /promo_codes/{codeId} {
+      allow get: if isValidId(codeId);
+      allow list: if request.query.limit != null && request.query.limit <= 50;
+      allow create: if isValidId(codeId)
+        && isValidPromoCode(incoming(), codeId)
+        && incoming().usedCount == 0
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(codeId)
+        && isValidPromoCode(incoming(), codeId)
+        && incoming().createdAt == existing().createdAt
+        && (
+          (incoming().usedCount == existing().usedCount + 1
+            && (existing().maxUses == 0 || incoming().usedCount <= existing().maxUses)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['usedCount']))
+          || incoming().diff(existing()).affectedKeys().hasOnly(['isActive'])
+        );
+      allow delete: if isValidId(codeId);
+    }
+
+    match /processed_tx_hashes/{txKey} {
+      allow get: if isValidId(txKey);
+      allow list: if request.query.limit != null && request.query.limit <= 50;
+      allow create: if isValidId(txKey)
+        && isValidProcessedTxHash(incoming(), txKey)
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /app_config/{configId} {
+      allow get: if isValidId(configId);
+      allow list: if request.query.limit != null && request.query.limit <= 10;
+      allow create, update: if (
+        (configId == 'ads'
+          && isValidAdsConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'season'
+          && isValidSeasonConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'channels'
+          && isValidChannelsConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'admins'
+          && isValidAdminsConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'payout_template'
+          && isValidPayoutTemplateConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'task_pricing'
+          && isValidTaskPricingConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'system_reset'
+          && isValidSystemResetConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'maintenance'
+          && isValidMaintenanceConfig(incoming())
+          && incoming().updatedAt == request.time)
+      );
+      allow delete: if false;
+    }
+
+    match /banned_users/{playerId} {
+      allow get: if isValidId(playerId);
+      allow list: if request.query.limit != null && request.query.limit <= 100;
+      allow create: if isValidId(playerId)
+        && isValidBannedUser(incoming(), playerId)
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(playerId)
+        && isValidBannedUser(incoming(), playerId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'handle', 'reason', 'bannedBy', 'bannedAtMs']);
+      allow delete: if isValidId(playerId);
+    }
+
+    match /bot_subscribers/{chatId} {
+      allow get: if isValidId(chatId);
+      allow list: if request.query.limit != null && request.query.limit <= 100;
+      allow create, update: if isValidId(chatId)
+        && isValidBotSubscriber(incoming(), chatId)
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+  }
+}

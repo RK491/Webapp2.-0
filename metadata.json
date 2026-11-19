@@ -1,0 +1,6 @@
+{
+  "name": "ChickenLand Farm",
+  "description": "An interactive poultry farm economy web app with live egg production, chicken packs, daily tasks, referral rewards, Top 10 leaderboard, and persistent deposit and withdrawal history.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
