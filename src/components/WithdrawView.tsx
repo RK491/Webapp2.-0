@@ -16,6 +16,8 @@ import {
   getWithdrawAdGateStatus,
   MIN_WITHDRAW_EGGS,
   validateWithdrawalInput,
+  WITHDRAW_ADS_CRITERIA_DEDUCT_COUNT,
+  WITHDRAW_ADS_DEDUCTION_RATE,
 } from '../game/economy';
 import type {
   ChannelVerificationResult,
@@ -209,6 +211,10 @@ export function WithdrawView({
             }`}
             style={{ width: `${adGatePct}%` }}
           />
+        </div>
+
+        <div className="text-[11px] font-semibold text-stone-500 dark:text-stone-400">
+          Each withdrawal deducts {Math.round(WITHDRAW_ADS_DEDUCTION_RATE * 100)}% ({WITHDRAW_ADS_CRITERIA_DEDUCT_COUNT} ads) from your {adGate.required}-ad criteria.
         </div>
 
         {!adGate.unlocked && onGoToTasks && (

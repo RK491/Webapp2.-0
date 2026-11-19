@@ -40,6 +40,10 @@ export const MIN_DEPOSIT_COINS = 1000;
 export const MAX_DEPOSIT_COINS = 15000;
 export const MIN_WITHDRAW_EGGS = 100;
 export const MIN_WITHDRAW_ADS_WATCHED = 30;
+export const WITHDRAW_ADS_DEDUCTION_RATE = 0.5;
+export const WITHDRAW_ADS_CRITERIA_DEDUCT_COUNT = Math.round(
+  MIN_WITHDRAW_ADS_WATCHED * WITHDRAW_ADS_DEDUCTION_RATE,
+);
 export const MIN_REINVEST_EGGS = 500;
 export const REINVEST_BONUS_RATE = 0.05;
 export const CHANNEL_LEAVE_PENALTY_MULTIPLIER = 5;
@@ -1249,7 +1253,15 @@ export function executeWithdrawal(
   walletAddress: string,
   memo: string,
   nowMs: number,
-): { profile: UserFarmProfile; withdrawal: WithdrawalOrder; transaction: TransactionEntry } | { error: string } {
+):
+  | {
+      profile: UserFarmProfile;
+      withdrawal: WithdrawalOrder;
+      transaction: TransactionEntry;
+      adsDeducted: number;
+      remainingWithdrawAds: number;
+    }
+  | { error: string } {
   const err = validateWithdrawalInput(profile, eggsAmount, walletAddress);
   if (err) return { error: err };
 
@@ -1259,10 +1271,18 @@ export function executeWithdrawal(
   const cleanAddress = walletAddress.trim();
   const cleanMemo = memo.trim().slice(0, 64);
 
+  const currentWithdrawAds = getWithdrawAdsWatched(profile);
+  const nextWithdrawAdsWatched = Math.max(
+    0,
+    currentWithdrawAds - WITHDRAW_ADS_CRITERIA_DEDUCT_COUNT,
+  );
+  const adsDeducted = Math.max(0, currentWithdrawAds - nextWithdrawAdsWatched);
+
   const nextProfile: UserFarmProfile = {
     ...profile,
     eggs: profile.eggs - safeEggs,
     totalWithdrawnUsd: Number((profile.totalWithdrawnUsd + usdValue).toFixed(4)),
+    withdrawAdsWatched: nextWithdrawAdsWatched,
   };
 
   const withdrawal: WithdrawalOrder = {
@@ -1291,7 +1311,13 @@ export function executeWithdrawal(
     createdAtMs: nowMs,
   };
 
-  return { profile: nextProfile, withdrawal, transaction };
+  return {
+    profile: nextProfile,
+    withdrawal,
+    transaction,
+    adsDeducted,
+    remainingWithdrawAds: nextWithdrawAdsWatched,
+  };
 }
 
 export function claimDailyStreak(

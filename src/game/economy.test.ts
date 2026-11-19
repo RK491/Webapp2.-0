@@ -98,6 +98,8 @@ import {
   getChickenMilestoneReached,
   getCoopFeverAdsWatched,
   getEffectiveAdminIds,
+  WITHDRAW_ADS_CRITERIA_DEDUCT_COUNT,
+  WITHDRAW_ADS_DEDUCTION_RATE,
   getGoldenEggCooldownRemainingMs,
   getTaskRemainingSlots,
   getTotalAdsWatched,
@@ -362,6 +364,40 @@ test('executeWithdrawal enforces 30-ad watch gate from 3 Tasks Coin Ad buttons, 
   assert.equal(ok.withdrawal.status, 'pending');
   assert.equal(ok.transaction.status, 'pending');
   assert.equal(ok.transaction.type, 'withdraw');
+  // 50% of 30-ad Ads Criteria (15 ads) is deducted automatically on withdrawal
+  assert.equal(WITHDRAW_ADS_DEDUCTION_RATE, 0.5);
+  assert.equal(WITHDRAW_ADS_CRITERIA_DEDUCT_COUNT, 15);
+  assert.equal(ok.adsDeducted, 15);
+  assert.equal(ok.remainingWithdrawAds, 15);
+  assert.equal(ok.profile.withdrawAdsWatched, 15);
+  assert.equal(getWithdrawAdGateStatus(ok.profile).watched, 15);
+  assert.equal(getWithdrawAdGateStatus(ok.profile).remaining, 15);
+  assert.equal(getWithdrawAdGateStatus(ok.profile).unlocked, false);
+
+  // Immediate 2nd withdrawal is blocked until 15 more Coin Ads are watched
+  const secondBlocked = executeWithdrawal(
+    ok.profile,
+    100,
+    'UQB06dO9oc06d-1c8DF03FLdCznEHz_aLIA69fxzITcunwpr',
+    '',
+    NOW + 1000,
+  );
+  assert.ok('error' in secondBlocked);
+
+  // If user had >30 ads (e.g. 45), withdrawing deducts 15 and retains remaining 30 (still unlocked)
+  const excessProfile = { ...fundedProfile, withdrawAdsWatched: 45 };
+  const excessOk = executeWithdrawal(
+    excessProfile,
+    150,
+    'UQB06dO9oc06d-1c8DF03FLdCznEHz_aLIA69fxzITcunwpr',
+    '',
+    NOW + 2000,
+  );
+  assert.ok(!('error' in excessOk));
+  assert.equal(excessOk.adsDeducted, 15);
+  assert.equal(excessOk.profile.withdrawAdsWatched, 30);
+  assert.equal(getWithdrawAdGateStatus(excessOk.profile).unlocked, true);
+
   assert.equal(getWithdrawalStatusMeta(ok.withdrawal.status).label, 'Pending Approval');
   assert.equal(getWithdrawalStatusMeta('approved').label, 'Approved');
   assert.equal(getWithdrawalStatusMeta('rejected').label, 'Rejected');
@@ -2162,6 +2198,44 @@ test('Withdraw 30-ad gate ONLY counts Tasks 3-site Coin Ad buttons and ignores F
     NOW + 130_000,
   );
   assert.ok(!('error' in wdOk));
+  assert.equal(wdOk.adsDeducted, 15);
+  assert.equal(getWithdrawAdsWatched(wdOk.profile), 15);
+  assert.equal(getWithdrawAdGateStatus(wdOk.profile).unlocked, false);
+  assert.equal(getWithdrawAdGateStatus(wdOk.profile).remaining, 15);
+
+  // Verify Firestore achievement-token round-trip persists lowered withdrawAdsWatched (30 -> 15)
+  const encodedAfterWd = encodeAchievementsWithAds(
+    ['__wd_ads:30'],
+    getTotalAdsWatched(wdOk.profile),
+    { withdrawAdsWatched: wdOk.profile.withdrawAdsWatched },
+  );
+  const decodedAfterWd = decodeAchievementsAndAds(
+    encodedAfterWd,
+    getTotalAdsWatched(wdOk.profile),
+    wdOk.profile.watchedAdsCount,
+    { withdrawAdsWatched: wdOk.profile.withdrawAdsWatched },
+  );
+  assert.equal(decodedAfterWd.withdrawAdsWatched, 15);
+
+  // Watching 15 more Coin Ads in Tasks re-unlocks withdrawals back at 30/30
+  let recharged = wdOk.profile;
+  for (let i = 0; i < 5; i += 1) {
+    const r = claimAdNetworkReward(recharged, 'adsgram', '2026-11-16', NOW + 200_000 + i * 1000);
+    assert.ok(!('error' in r));
+    recharged = r.profile;
+  }
+  for (let i = 0; i < 5; i += 1) {
+    const r = claimAdNetworkReward(recharged, 'gigapub', '2026-11-16', NOW + 210_000 + i * 1000);
+    assert.ok(!('error' in r));
+    recharged = r.profile;
+  }
+  for (let i = 0; i < 5; i += 1) {
+    const r = claimAdNetworkReward(recharged, 'monetag', '2026-11-16', NOW + 220_000 + i * 1000);
+    assert.ok(!('error' in r));
+    recharged = r.profile;
+  }
+  assert.equal(getWithdrawAdsWatched(recharged), 30);
+  assert.equal(getWithdrawAdGateStatus(recharged).unlocked, true);
 });
 
 test('encodeAchievementsWithAds and decodeAchievementsAndAds round-trip totalAdsWatched within 50-item Firestore limit', () => {

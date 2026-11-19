@@ -63,6 +63,7 @@ import {
   getGoldenEggCooldownRemainingMs,
   getUnifiedUserId,
   getVerifiableClaimedChannelTasks,
+  getWithdrawAdGateStatus,
   isAdminPlayerId,
   isAutoHarvestDroneActive,
   MIN_WITHDRAW_ADS_WATCHED,
@@ -182,6 +183,7 @@ import {
   tryRunAdsgramTaskAd,
   tryRunExternalRewardedAd,
 } from './utils/ads';
+import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { getStoredLanguage, setStoredLanguage, t } from './utils/i18n';
 import {
   calculateMsUntilBasketFull,
@@ -578,17 +580,28 @@ export default function App() {
     setShowSplash(false);
   }, []);
 
+  const isOnline = useOnlineStatus();
+  const isOnlineRef = useRef<boolean>(isOnline);
+  isOnlineRef.current = isOnline;
+  const [referralRetryNonce, setReferralRetryNonce] = useState(0);
+
   const PENDING_REF_STORAGE_KEY = 'chickenland_pending_ref_v1';
   const [pendingRefCode, setPendingRefCode] = useState<string | null>(() => {
-    const liveAction = parseStartAppAction(
-      detectedIdentity.startParam || getBrowserStartParam(),
-    );
+    const rawStart = detectedIdentity.startParam || getBrowserStartParam();
+    const liveAction = parseStartAppAction(rawStart);
     if (liveAction.referralCode) {
       try {
         localStorage.setItem(PENDING_REF_STORAGE_KEY, liveAction.referralCode);
       } catch {
         // ignore storage errors
       }
+      console.log('[ReferralTrace] init:pendingRefCode_from_start_param', {
+        referralCode: liveAction.referralCode,
+        fromTelegramStartParam: Boolean(detectedIdentity.startParam),
+        initialPlayerId: detectedIdentity.playerId || 'pending',
+        isTelegramDetected: detectedIdentity.isTelegramDetected,
+        online: typeof navigator === 'undefined' ? true : navigator.onLine,
+      });
       return liveAction.referralCode;
     }
     if (typeof window !== 'undefined') {
@@ -596,6 +609,12 @@ export default function App() {
         const stored = localStorage.getItem(PENDING_REF_STORAGE_KEY);
         const storedAction = parseStartAppAction(stored);
         if (storedAction.referralCode) {
+          console.log('[ReferralTrace] init:pendingRefCode_restored_from_storage', {
+            referralCode: storedAction.referralCode,
+            initialPlayerId: detectedIdentity.playerId || 'pending',
+            isTelegramDetected: detectedIdentity.isTelegramDetected,
+            online: typeof navigator === 'undefined' ? true : navigator.onLine,
+          });
           return storedAction.referralCode;
         }
         if (stored) {
@@ -614,6 +633,7 @@ export default function App() {
   const latestTransactionsRef = useRef<TransactionEntry[]>(transactions);
   latestTransactionsRef.current = transactions;
   const referralAttemptedKeysRef = useRef<Set<string>>(new Set());
+  const telegramHydrationElapsedRef = useRef<boolean>(false);
   const welcomeCheckedForPlayerRef = useRef<string | null>(null);
   const ensurePromiseRef = useRef<Promise<UserFarmProfile | void>>(Promise.resolve());
   const [isPlayerSynced, setIsPlayerSynced] = useState(false);
@@ -717,6 +737,45 @@ export default function App() {
   }, [isBanned, musicEnabled]);
 
   useEffect(() => {
+    const handleOffline = () => {
+      console.log('[ReferralTrace] network:offline', {
+        pendingRefCode: pendingRefCodeRef.current,
+        activePlayerId: activePlayerIdRef.current,
+      });
+    };
+    const handleOnline = () => {
+      referralAttemptedKeysRef.current.clear();
+      let restoredFromStorage: string | null = null;
+      try {
+        const stored = localStorage.getItem(PENDING_REF_STORAGE_KEY);
+        const storedAction = parseStartAppAction(stored);
+        if (storedAction.referralCode) {
+          restoredFromStorage = storedAction.referralCode;
+          if (pendingRefCodeRef.current !== storedAction.referralCode) {
+            pendingRefCodeRef.current = storedAction.referralCode;
+            setPendingRefCode(storedAction.referralCode);
+          }
+        }
+      } catch {
+        // ignore storage errors
+      }
+      console.log('[ReferralTrace] network:online -> cleared referralAttemptedKeysRef for retry', {
+        pendingRefCode: pendingRefCodeRef.current,
+        restoredFromStorage,
+        activePlayerId: activePlayerIdRef.current,
+        isPlayerSynced,
+      });
+      setReferralRetryNonce((n) => n + 1);
+    };
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [isPlayerSynced]);
+
+  useEffect(() => {
     const syncIdentityAndStartParam = () => {
       ensureTelegramWebAppReady();
       const next = resolveActivePlayerIdentity();
@@ -734,17 +793,51 @@ export default function App() {
             // ignore storage errors
           }
         }
-      } else if (parsed.referralCode && parsed.referralCode !== pendingRefCodeRef.current) {
-        pendingRefCodeRef.current = parsed.referralCode;
-        setPendingRefCode(parsed.referralCode);
+      } else if (parsed.referralCode) {
         try {
           localStorage.setItem(PENDING_REF_STORAGE_KEY, parsed.referralCode);
+        } catch {
+          // ignore storage errors
+        }
+        if (parsed.referralCode !== pendingRefCodeRef.current) {
+          console.log('[ReferralTrace] syncIdentityAndStartParam:captured_referral_code', {
+            referralCode: parsed.referralCode,
+            previousPendingRefCode: pendingRefCodeRef.current,
+            nextPlayerId: next.playerId,
+            activePlayerId: activePlayerIdRef.current,
+            isTelegramDetected: next.isTelegramDetected,
+            online: typeof navigator === 'undefined' ? true : navigator.onLine,
+          });
+          pendingRefCodeRef.current = parsed.referralCode;
+          setPendingRefCode(parsed.referralCode);
+        }
+      } else if (!pendingRefCodeRef.current) {
+        try {
+          const stored = localStorage.getItem(PENDING_REF_STORAGE_KEY);
+          const storedAction = parseStartAppAction(stored);
+          if (storedAction.referralCode) {
+            console.log('[ReferralTrace] syncIdentityAndStartParam:restored_cached_referral_code', {
+              referralCode: storedAction.referralCode,
+              nextPlayerId: next.playerId,
+              activePlayerId: activePlayerIdRef.current,
+              isTelegramDetected: next.isTelegramDetected,
+              online: typeof navigator === 'undefined' ? true : navigator.onLine,
+            });
+            pendingRefCodeRef.current = storedAction.referralCode;
+            setPendingRefCode(storedAction.referralCode);
+          }
         } catch {
           // ignore storage errors
         }
       }
 
       if (next.isTelegramDetected && next.playerId && next.playerId !== activePlayerIdRef.current) {
+        console.log('[ReferralTrace] syncIdentityAndStartParam:telegram_identity_hydrated', {
+          fromPlayerId: activePlayerIdRef.current,
+          toPlayerId: next.playerId,
+          preservedPendingRefCode: pendingRefCodeRef.current,
+        });
+        referralAttemptedKeysRef.current.clear();
         setDetectedIdentity(next);
         const cached = loadCachedPlayerProfile(next.playerId);
         if (cached) {
@@ -752,6 +845,10 @@ export default function App() {
           setProfile(cached);
         }
       } else if (next.isTelegramDetected && !detectedIdentity.isTelegramDetected) {
+        console.log('[ReferralTrace] syncIdentityAndStartParam:telegram_detected_same_id', {
+          playerId: next.playerId || activePlayerIdRef.current,
+          preservedPendingRefCode: pendingRefCodeRef.current,
+        });
         setDetectedIdentity(next);
       }
     };
@@ -773,7 +870,19 @@ export default function App() {
   useEffect(() => {
     if (playerSessionTokenRef.current) return;
     const initData = getTelegramInitData();
-    if (!initData) return;
+    if (!initData) {
+      console.log('[ReferralTrace] auth:verify-telegram:skipped_no_initData', {
+        activePlayerId,
+        isTelegramDetected: detectedIdentity.isTelegramDetected,
+        pendingRefCode: pendingRefCodeRef.current,
+      });
+      return;
+    }
+    console.log('[ReferralTrace] auth:verify-telegram:request', {
+      activePlayerId,
+      isTelegramDetected: detectedIdentity.isTelegramDetected,
+      pendingRefCode: pendingRefCodeRef.current,
+    });
     void safeFetchJson<{ ok?: boolean; verified?: boolean; sessionToken?: string }>(
       '/api/auth/verify-telegram',
       {
@@ -782,12 +891,18 @@ export default function App() {
         body: JSON.stringify({ initData }),
       },
     ).then((res) => {
+      console.log('[ReferralTrace] auth:verify-telegram:response', {
+        activePlayerId,
+        ok: Boolean(res?.ok),
+        verified: Boolean(res?.verified),
+        hasSessionToken: Boolean(res?.sessionToken),
+      });
       if (res?.ok && res.verified && res.sessionToken) {
         playerSessionTokenRef.current = res.sessionToken;
         setPlayerSessionToken(res.sessionToken);
       }
     });
-  }, [activePlayerId, detectedIdentity.isTelegramDetected]);
+  }, [activePlayerId, detectedIdentity.isTelegramDetected, isOnline, referralRetryNonce]);
 
   const handleToggleMuteAll = useCallback(() => {
     const next = computeMuteAllToggle(audioSettings);
@@ -1274,6 +1389,15 @@ export default function App() {
         latestProfileRef.current = resolvedProfile;
         setProfile(resolvedProfile);
         setIsPlayerSynced(!fromCache);
+        console.log('[ReferralTrace] playerSync:ensurePlayerInFirestore', {
+          activePlayerId,
+          isNewPlayer,
+          fromCache,
+          isPlayerSynced: !fromCache,
+          referredBy: resolvedProfile.referredBy || '',
+          pendingRefCode: pendingRefCodeRef.current,
+          online: isOnlineRef.current,
+        });
 
         if (!skipWelcome && isNewPlayer) {
           const seenKey = `chickenland_signup_bonus_seen_${activePlayerId}`;
@@ -1303,8 +1427,14 @@ export default function App() {
             }
           }, 1500 * Math.pow(2, attempt));
         }
-      } catch {
+      } catch (err) {
         if (cancelled) return;
+        console.warn('[ReferralTrace] playerSync:ensure_error', {
+          activePlayerId,
+          attempt,
+          pendingRefCode: pendingRefCodeRef.current,
+          message: err instanceof Error ? err.message : String(err),
+        });
         const cached = loadCachedPlayerProfile(activePlayerId);
         if (cached) {
           latestProfileRef.current = cached;
@@ -1324,6 +1454,10 @@ export default function App() {
 
     const handleOnlineRetry = () => {
       if (!cancelled && !syncedSuccess) {
+        console.log('[ReferralTrace] playerSync:online_retry', {
+          activePlayerId,
+          pendingRefCode: pendingRefCodeRef.current,
+        });
         ensurePromiseRef.current = init(0);
       }
     };
@@ -1347,7 +1481,7 @@ export default function App() {
     skipWelcome,
   ]);
 
-  // Reliably link pending referral once player is synced (waits for Telegram SDK hydration and sends Bot DM fallback)
+  // Reliably link pending referral once online & player is synced (waits for Telegram SDK hydration and caches offline)
   useEffect(() => {
     const parsedRefAction = parseStartAppAction(pendingRefCode);
     if (parsedRefAction.actionTab) {
@@ -1362,12 +1496,81 @@ export default function App() {
       return;
     }
     const refCode = (parsedRefAction.referralCode || '').trim();
-    if (!refCode || !isPlayerSynced || isBanned) return;
-    const currentProfile = latestProfileRef.current;
-    if (!currentProfile?.uid || currentProfile.uid !== activePlayerId) return;
+    if (!refCode || isBanned) return;
 
-    const targetUid = currentProfile.uid;
-    const clearPendingRef = () => {
+    const currentProfile = latestProfileRef.current;
+    const targetUid = currentProfile?.uid || activePlayerId;
+    const inActiveTelegramWebView = ensureTelegramWebAppReady() || hasTelegramRuntimeContext();
+
+    console.log('[ReferralTrace] referralEffect:evaluate', {
+      refCode,
+      activePlayerId,
+      profileUid: currentProfile?.uid || '',
+      profileReferredBy: currentProfile?.referredBy || '',
+      isTelegramDetected: detectedIdentity.isTelegramDetected,
+      inActiveTelegramWebView,
+      isPlayerSynced,
+      isOnline,
+      referralRetryNonce,
+      attemptedKeys: Array.from(referralAttemptedKeysRef.current),
+    });
+
+    // Wait for Telegram SDK hydration BEFORE checking guest referredBy or clearing pendingRefCode,
+    // so a guest localStorage profile never overwrites or wipes a Telegram referral link before tg_* hydrates.
+    if (
+      inActiveTelegramWebView &&
+      !detectedIdentity.isTelegramDetected &&
+      !/^tg_/.test(targetUid) &&
+      !telegramHydrationElapsedRef.current
+    ) {
+      console.log('[ReferralTrace] referralEffect:waiting_telegram_hydration', {
+        refCode,
+        targetUid,
+        isOnline,
+        isPlayerSynced,
+      });
+      const hydrationTimer = window.setTimeout(() => {
+        telegramHydrationElapsedRef.current = true;
+        console.log('[ReferralTrace] referralEffect:telegram_hydration_timer_fired', {
+          refCode,
+          activePlayerId: activePlayerIdRef.current,
+          isOnline: isOnlineRef.current,
+        });
+        setReferralRetryNonce((n) => n + 1);
+      }, 1950);
+      return () => window.clearTimeout(hydrationTimer);
+    }
+
+    if (!isOnline || !isPlayerSynced) {
+      try {
+        localStorage.setItem(PENDING_REF_STORAGE_KEY, refCode);
+      } catch {
+        // ignore storage errors
+      }
+      console.log('[ReferralTrace] referralEffect:cached_waiting_sync_or_online', {
+        refCode,
+        targetUid,
+        isOnline,
+        isPlayerSynced,
+      });
+      return;
+    }
+
+    if (!currentProfile?.uid || currentProfile.uid !== activePlayerId) {
+      console.log('[ReferralTrace] referralEffect:waiting_profile_match', {
+        refCode,
+        activePlayerId,
+        profileUid: currentProfile?.uid || '',
+      });
+      return;
+    }
+
+    const clearPendingRef = (reason: string) => {
+      console.log('[ReferralTrace] clearPendingRef', {
+        reason,
+        refCode,
+        targetUid,
+      });
       pendingRefCodeRef.current = null;
       setPendingRefCode(null);
       try {
@@ -1441,7 +1644,7 @@ export default function App() {
     if (currentProfile.referredBy) {
       markReferralVerifiedLocally(currentProfile.referredBy, currentProfile.referralActivated);
       void syncDirectReferralRecord(currentProfile.referredBy, currentProfile);
-      clearPendingRef();
+      clearPendingRef('profile_already_has_referredBy');
       return;
     }
 
@@ -1471,44 +1674,74 @@ export default function App() {
     };
 
     const runAttempt = () => {
+      if (!isOnlineRef.current) {
+        console.log('[ReferralTrace] runAttempt:aborted_offline', {
+          targetUid,
+          refCode,
+        });
+        return;
+      }
       const attemptKey = `${targetUid}::${refCode.toUpperCase()}`;
-      if (referralAttemptedKeysRef.current.has(attemptKey)) return;
+      if (referralAttemptedKeysRef.current.has(attemptKey)) {
+        console.log('[ReferralTrace] runAttempt:already_in_flight_or_attempted', {
+          attemptKey,
+        });
+        return;
+      }
       referralAttemptedKeysRef.current.add(attemptKey);
+      console.log('[ReferralTrace] runAttempt:starting', {
+        attemptKey,
+        targetUid,
+        refCode,
+      });
 
       const applyReferral = async () => {
         const isStillSamePlayer = () => activePlayerIdRef.current === targetUid;
         await ensurePromiseRef.current?.catch(() => undefined);
         if (!isStillSamePlayer()) {
+          console.log('[ReferralTrace] applyReferral:player_changed_before_ensure', {
+            targetUid,
+            currentActivePlayerId: activePlayerIdRef.current,
+          });
           referralAttemptedKeysRef.current.delete(attemptKey);
           return;
         }
         const latestBefore = latestProfileRef.current;
         if (latestBefore.uid === targetUid && latestBefore.referredBy) {
           markReferralVerifiedLocally(latestBefore.referredBy);
-          clearPendingRef();
+          clearPendingRef('already_referred_after_ensure');
           return;
         }
         try {
           const tgInitData = getTelegramInitData();
-          let response = await fetch(
-            resolveApiUrl(tgInitData ? '/api/referral/claim' : '/api/referrals/apply'),
-            {
-              method: 'POST',
-              cache: 'no-store',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                playerId: targetUid,
-                referrerId: refCode,
-                refCode,
-                displayName: latestBefore.displayName,
-                handle: latestBefore.handle,
-                photoUrl: latestBefore.photoUrl,
-                initData: tgInitData,
-                token: playerSessionTokenRef.current,
-              }),
-            },
-          );
+          const primaryEndpoint = tgInitData ? '/api/referral/claim' : '/api/referrals/apply';
+          console.log('[ReferralTrace] applyReferral:api_request', {
+            endpoint: primaryEndpoint,
+            targetUid,
+            refCode,
+            hasTgInitData: Boolean(tgInitData),
+            hasSessionToken: Boolean(playerSessionTokenRef.current),
+          });
+          let response = await fetch(resolveApiUrl(primaryEndpoint), {
+            method: 'POST',
+            cache: 'no-store',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              playerId: targetUid,
+              referrerId: refCode,
+              refCode,
+              displayName: latestBefore.displayName,
+              handle: latestBefore.handle,
+              photoUrl: latestBefore.photoUrl,
+              initData: tgInitData,
+              token: playerSessionTokenRef.current,
+            }),
+          });
           if (tgInitData && response.status === 401) {
+            console.log('[ReferralTrace] applyReferral:claim_401_fallback_to_apply', {
+              targetUid,
+              refCode,
+            });
             response = await fetch(resolveApiUrl('/api/referrals/apply'), {
               method: 'POST',
               cache: 'no-store',
@@ -1544,7 +1777,25 @@ export default function App() {
             botDmSent?: boolean;
           } | null;
 
-          if (!isStillSamePlayer()) return;
+          console.log('[ReferralTrace] applyReferral:api_response', {
+            status: response.status,
+            ok: Boolean(payload?.ok),
+            claimed: Boolean(payload?.claimed),
+            applied: Boolean(payload?.applied),
+            activated: Boolean(payload?.activated ?? payload?.referralActivated),
+            alreadyLinked: Boolean(payload?.alreadyLinked),
+            reason: payload?.reason || null,
+            referrerUid: payload?.referrerUid || null,
+          });
+
+          if (!isStillSamePlayer()) {
+            console.log('[ReferralTrace] applyReferral:player_changed_after_api', {
+              targetUid,
+              currentActivePlayerId: activePlayerIdRef.current,
+            });
+            referralAttemptedKeysRef.current.delete(attemptKey);
+            return;
+          }
 
           if (response.ok && payload?.ok) {
             if (payload.applied || payload.claimed) {
@@ -1582,7 +1833,7 @@ export default function App() {
               showToast(
                 `🎉 Referral Linked! +${bonus} welcome coins unlocked via ${payload.referrerName || 'a friend'}!`,
               );
-              clearPendingRef();
+              clearPendingRef('api_referral_linked');
               return;
             }
             if (payload.reason === 'already_linked' || payload.alreadyLinked) {
@@ -1592,23 +1843,27 @@ export default function App() {
                   Boolean(payload.activated ?? payload.referralActivated),
                 );
               }
-              clearPendingRef();
+              clearPendingRef('api_already_linked');
               return;
             }
             if (payload.reason === 'self_referral') {
-              clearPendingRef();
+              clearPendingRef('api_self_referral');
               return;
             }
             if (payload.reason === 'invalid_code') {
-              clearPendingRef();
+              clearPendingRef('api_invalid_code');
               return;
             }
           } else if (payload?.reason === 'invalid_code') {
-            clearPendingRef();
+            clearPendingRef('api_4xx_invalid_code');
             return;
           }
-        } catch {
-          // Fall through to client-side Firestore transaction fallback
+        } catch (apiErr) {
+          console.warn('[ReferralTrace] applyReferral:api_error_falling_back_to_firestore', {
+            targetUid,
+            refCode,
+            message: apiErr instanceof Error ? apiErr.message : String(apiErr),
+          });
         }
 
         if (!isStillSamePlayer()) {
@@ -1619,9 +1874,27 @@ export default function App() {
         try {
           const snapshotProfile =
             latestProfileRef.current.uid === targetUid ? latestProfileRef.current : currentProfile;
+          console.log('[ReferralTrace] applyReferral:calling_firestore_fallback', {
+            uid: snapshotProfile.uid,
+            refCode,
+            hasReferredBy: Boolean(snapshotProfile.referredBy),
+          });
           const refRes = await applyReferralCodeInFirestore(snapshotProfile, refCode);
-          if (!isStillSamePlayer()) return;
+          if (!isStillSamePlayer()) {
+            console.log('[ReferralTrace] applyReferral:player_changed_after_firestore', {
+              targetUid,
+              currentActivePlayerId: activePlayerIdRef.current,
+            });
+            referralAttemptedKeysRef.current.delete(attemptKey);
+            return;
+          }
           if (!('error' in refRes)) {
+            console.log('[ReferralTrace] applyReferral:firestore_linked_success', {
+              uid: refRes.profile.uid,
+              referrerUid: refRes.referrerUid,
+              activated: refRes.activated,
+              coinsRewarded: refRes.coinsRewarded,
+            });
             latestProfileRef.current = refRes.profile;
             setProfile(refRes.profile);
             saveCachedPlayerProfile(refRes.profile);
@@ -1652,10 +1925,15 @@ export default function App() {
                 await sendLocalReferralDmFallback(refRes.referrerUid, refRes.coinsRewarded);
               }
             }
-            clearPendingRef();
+            clearPendingRef('firestore_referral_linked');
             return;
           }
 
+          console.warn('[ReferralTrace] applyReferral:firestore_returned_error', {
+            uid: targetUid,
+            refCode,
+            error: refRes.error,
+          });
           const errLow = refRes.error.toLowerCase();
           if (
             errLow.includes('not found') ||
@@ -1664,11 +1942,16 @@ export default function App() {
             errLow.includes('yourself') ||
             errLow.includes('invalid')
           ) {
-            clearPendingRef();
+            clearPendingRef(`firestore_terminal_error:${refRes.error}`);
           } else {
             referralAttemptedKeysRef.current.delete(attemptKey);
           }
-        } catch {
+        } catch (fsErr) {
+          console.warn('[ReferralTrace] applyReferral:firestore_exception_preserving_pending_ref', {
+            uid: targetUid,
+            refCode,
+            message: fsErr instanceof Error ? fsErr.message : String(fsErr),
+          });
           referralAttemptedKeysRef.current.delete(attemptKey);
         }
       };
@@ -1676,29 +1959,23 @@ export default function App() {
       void applyReferral();
     };
 
-    const inActiveTelegramWebView = ensureTelegramWebAppReady() || hasTelegramRuntimeContext();
-    if (inActiveTelegramWebView && !detectedIdentity.isTelegramDetected && !/^tg_/.test(targetUid)) {
-      // Wait for Telegram SDK initData / user hydration (~1.8s poll in syncIdentityAndStartParam)
-      // before falling back to guest ID, so the referral code isn't consumed by a temp guest ID.
-      const hydrationTimer = window.setTimeout(runAttempt, 1950);
-      return () => window.clearTimeout(hydrationTimer);
-    }
-
     runAttempt();
     return undefined;
   }, [
     activePlayerId,
     detectedIdentity.isTelegramDetected,
     isBanned,
+    isOnline,
     isPlayerSynced,
     pendingRefCode,
     profile.referredBy,
+    referralRetryNonce,
     showToast,
   ]);
 
   // Recover pending bot /start referrals when user opens Mini App via bottom-left "Open" menu button (no startapp query param)
   useEffect(() => {
-    if (!isPlayerSynced || isBanned) return;
+    if (!isOnline || !isPlayerSynced || isBanned) return;
     if (pendingRefCode) return;
     const currentProfile = latestProfileRef.current;
     if (!currentProfile?.uid || currentProfile.uid !== activePlayerId) return;
@@ -1718,7 +1995,7 @@ export default function App() {
     let inFlight = false;
 
     const attemptClaimPending = async () => {
-      if (cancelled || inFlight) return;
+      if (cancelled || inFlight || !isOnlineRef.current) return;
       if (claimPendingAttemptsRef.current.resolved || claimPendingAttemptsRef.current.count >= 4) return;
       if (pendingRefCodeRef.current) return;
       inFlight = true;
@@ -1731,6 +2008,10 @@ export default function App() {
           return;
         }
         claimPendingAttemptsRef.current.count += 1;
+        console.log('[ReferralTrace] claimPending:request', {
+          targetUid,
+          attempt: claimPendingAttemptsRef.current.count,
+        });
 
         const res = await fetch(resolveApiUrl('/api/referrals/claim-pending'), {
           method: 'POST',
@@ -1758,6 +2039,15 @@ export default function App() {
             referredBonusCoins?: number;
             nextReferredCoins?: number;
           } | null;
+          console.log('[ReferralTrace] claimPending:response', {
+            targetUid,
+            status: res.status,
+            ok: Boolean(payload?.ok),
+            applied: Boolean(payload?.applied),
+            alreadyApplied: Boolean(payload?.alreadyApplied),
+            reason: payload?.reason || null,
+            referrerUid: payload?.referrerUid || null,
+          });
           if (!cancelled && payload?.ok && activePlayerIdRef.current === targetUid) {
             if (payload.applied || payload.alreadyApplied) {
               claimPendingAttemptsRef.current.resolved = true;
@@ -1796,8 +2086,11 @@ export default function App() {
             }
           }
         }
-      } catch {
-        // Non-fatal
+      } catch (err) {
+        console.warn('[ReferralTrace] claimPending:error', {
+          targetUid,
+          message: err instanceof Error ? err.message : String(err),
+        });
       } finally {
         inFlight = false;
       }
@@ -1826,11 +2119,11 @@ export default function App() {
       window.removeEventListener('focus', handleResumeCheck);
       document.removeEventListener('visibilitychange', handleResumeCheck);
     };
-  }, [activePlayerId, isBanned, isPlayerSynced, pendingRefCode, profile.referredBy, showToast]);
+  }, [activePlayerId, isBanned, isOnline, isPlayerSynced, pendingRefCode, profile.referredBy, referralRetryNonce, showToast]);
 
   // Sync server /api/referral/stats & /api/referrals storage alongside Firestore referrals so Friends tab stays complete
   useEffect(() => {
-    if (!activePlayerId || isBanned) return;
+    if (!activePlayerId || isBanned || !isOnline) return;
     let cancelled = false;
     const fetchServerReferrals = async () => {
       try {
@@ -1889,6 +2182,11 @@ export default function App() {
         }
 
         if (cancelled) return;
+        console.log('[ReferralTrace] serverReferrals:synced', {
+          activePlayerId,
+          mergedReferralCount: mergedIds.size,
+          detectedReferrer,
+        });
         if (mergedIds.size > 0) {
           setServerReferralIds(Array.from(mergedIds));
         }
@@ -1906,15 +2204,18 @@ export default function App() {
             // ignore storage errors
           }
         }
-      } catch {
-        // Non-fatal fallback
+      } catch (err) {
+        console.warn('[ReferralTrace] serverReferrals:error', {
+          activePlayerId,
+          message: err instanceof Error ? err.message : String(err),
+        });
       }
     };
     void fetchServerReferrals();
     return () => {
       cancelled = true;
     };
-  }, [activePlayerId, activeTab, isBanned, isPlayerSynced, referrals.length]);
+  }, [activePlayerId, activeTab, isBanned, isOnline, isPlayerSynced, referralRetryNonce, referrals.length]);
 
   const persistMutation = useCallback(
     async (params: {
@@ -2748,7 +3049,10 @@ export default function App() {
         status: 'pending',
       }),
     });
-    showToast(`Withdrawal submitted (${res.withdrawal.gramAmount} GRAM) — Pending Admin approval`);
+    const updatedAdGate = getWithdrawAdGateStatus(res.profile);
+    showToast(
+      `Withdrawal submitted (${res.withdrawal.gramAmount} GRAM) — Pending Admin approval · Ads criteria ${updatedAdGate.watched}/${updatedAdGate.required}`,
+    );
   };
 
   const handleReviewWithdrawal = async (

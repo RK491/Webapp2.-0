@@ -604,10 +604,24 @@ export async function applyReferralCodeInFirestore(
   const rawTrimmed = rawCodeOrId.trim();
   const strippedParam = rawTrimmed.replace(/^(?:ref|r)_/i, '').trim();
   const codeUpper = rawTrimmed.toUpperCase();
+  console.log('[ReferralTrace] applyReferralCodeInFirestore:start', {
+    playerUid: currentProfile.uid,
+    rawCodeOrId: rawTrimmed,
+    strippedParam,
+    hasReferredBy: Boolean(currentProfile.referredBy),
+  });
   if (!rawTrimmed || rawTrimmed.length < 3) {
+    console.warn('[ReferralTrace] applyReferralCodeInFirestore:rejected_invalid_code', {
+      playerUid: currentProfile.uid,
+      rawCodeOrId: rawTrimmed,
+    });
     return { error: 'Enter a valid referral ID or code.' };
   }
   if (currentProfile.referredBy) {
+    console.log('[ReferralTrace] applyReferralCodeInFirestore:already_referred', {
+      playerUid: currentProfile.uid,
+      referredBy: currentProfile.referredBy,
+    });
     return { error: 'You have already used a referral link on this account.' };
   }
 
@@ -620,6 +634,10 @@ export async function applyReferralCodeInFirestore(
     strippedParam === currentProfile.uid ||
     (candidateUid && candidateUid === currentCanonicalUid)
   ) {
+    console.warn('[ReferralTrace] applyReferralCodeInFirestore:rejected_self_referral', {
+      playerUid: currentProfile.uid,
+      rawCodeOrId: rawTrimmed,
+    });
     return { error: 'You cannot refer yourself.' };
   }
 
@@ -692,12 +710,27 @@ export async function applyReferralCodeInFirestore(
     }
 
     if (!referrerUid) {
+      console.warn('[ReferralTrace] applyReferralCodeInFirestore:referrer_not_found', {
+        playerUid: currentProfile.uid,
+        rawCodeOrId: rawTrimmed,
+      });
       return { error: `Referral ID "${rawTrimmed}" not found.` };
     }
 
     if (referrerUid === currentProfile.uid) {
+      console.warn('[ReferralTrace] applyReferralCodeInFirestore:rejected_self_uid', {
+        playerUid: currentProfile.uid,
+        referrerUid,
+      });
       return { error: 'You cannot refer yourself.' };
     }
+
+    console.log('[ReferralTrace] applyReferralCodeInFirestore:referrer_resolved', {
+      playerUid: currentProfile.uid,
+      rawCodeOrId: rawTrimmed,
+      referrerUid,
+      referrerName,
+    });
 
     const nowMs = Date.now();
     const rewardCoins = REFERRER_SIGNUP_BONUS_COINS;
@@ -858,10 +891,21 @@ export async function applyReferralCodeInFirestore(
     });
 
     if (alreadyLinked) {
+      console.log('[ReferralTrace] applyReferralCodeInFirestore:tx_already_linked', {
+        playerUid: currentProfile.uid,
+        referrerUid,
+      });
       return { error: 'You have already used a referral link on this account.' };
     }
 
     saveCachedPlayerProfile(nextProfile);
+    console.log('[ReferralTrace] applyReferralCodeInFirestore:committed', {
+      playerUid: nextProfile.uid,
+      referrerUid,
+      referrerName,
+      coinsRewarded: activatedOnLink ? rewardCoins : 0,
+      activated: activatedOnLink,
+    });
     return {
       profile: nextProfile,
       transaction: userTx,
@@ -871,6 +915,11 @@ export async function applyReferralCodeInFirestore(
       activated: activatedOnLink,
     };
   } catch (error) {
+    console.warn('[ReferralTrace] applyReferralCodeInFirestore:error', {
+      playerUid: currentProfile.uid,
+      rawCodeOrId: rawTrimmed,
+      message: error instanceof Error ? error.message : String(error),
+    });
     if (error instanceof Error && error.message === 'REFERRER_MISSING') {
       return { error: `Referral ID "${rawTrimmed}" not found.` };
     }
