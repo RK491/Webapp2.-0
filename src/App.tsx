@@ -29,7 +29,6 @@ import {
   claimAdNetworkReward,
   claimAdsgramBotJoinReward,
   claimDailyStreak,
-  claimGoldenEggDrop,
   claimPromoCode,
   claimReferralMilestone,
   collectEggs,
@@ -55,11 +54,13 @@ import {
   extractTelegramNumericUserId,
   formatAwayDuration,
   formatChannelsHandleSummary,
+  formatGoldenEggCooldownWait,
   formatPromoRewardSummary,
   formatShortTonWallet,
   getActiveRequiredChannels,
   getCoopFeverProgress,
   getEffectiveAdminIds,
+  getGoldenEggCooldownRemainingMs,
   getUnifiedUserId,
   getVerifiableClaimedChannelTasks,
   isAdminPlayerId,
@@ -93,6 +94,8 @@ import {
   adminRemoveReferralRelationInFirestore,
   applyReferralCodeInFirestore,
   banPlayerInFirestore,
+  claimGoldenEggInFirestore,
+  clearStoredGoldenEggClaimAtMs,
   commitPlayerMutation,
   createCustomTaskInFirestore,
   createPaidCustomTaskInFirestore,
@@ -103,6 +106,7 @@ import {
   executeDataResetInFirestore,
   fetchCustomTasksFromFirestore,
   fetchPlayerReferralsFromFirestore,
+  getStoredGoldenEggClaimAtMs,
   getStoredPlayerId,
   incrementPromoCodeUseInFirestore,
   incrementTaskClaimCountInFirestore,
@@ -119,6 +123,7 @@ import {
   saveTaskPricingConfigInFirestore,
   saveWithdrawApproveTemplateInFirestore,
   searchUsersInFirestore,
+  setStoredGoldenEggClaimAtMs,
   subscribeToAdConfig,
   subscribeToAdminsConfig,
   subscribeToAllWithdrawRequests,
@@ -216,10 +221,13 @@ import {
   cacheDetectedTelegramBotConfig,
   clearLocalAdminBotConfig,
   detectBrowserTelegramBotConfig,
+  ensureTelegramWebAppReady,
+  getBrowserStartParam,
   getLocalAdminBotConfig,
   getTelegramChannelUrl,
   getTelegramInitData,
   loadLocalChannelLogs,
+  parseStartAppAction,
   resolveApiUrl,
   safeFetchJson,
   setLocalAdminBotConfig,
@@ -474,7 +482,12 @@ export default function App() {
     [activeRequiredChannels],
   );
 
-  const [activeTab, setActiveTab] = useState<NavTab>('farm');
+  const [activeTab, setActiveTab] = useState<NavTab>(() => {
+    const initialAction = parseStartAppAction(
+      detectedIdentity.startParam || getBrowserStartParam(),
+    );
+    return initialAction.actionTab || 'farm';
+  });
   const [subView, setSubView] = useState<SubView>(() => {
     if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('admin') === '1') {
       return 'admin';
@@ -566,36 +579,29 @@ export default function App() {
 
   const PENDING_REF_STORAGE_KEY = 'chickenland_pending_ref_v1';
   const [pendingRefCode, setPendingRefCode] = useState<string | null>(() => {
-    if (detectedIdentity.startParam?.trim()) {
-      const clean = detectedIdentity.startParam.trim();
+    const liveAction = parseStartAppAction(
+      detectedIdentity.startParam || getBrowserStartParam(),
+    );
+    if (liveAction.referralCode) {
       try {
-        localStorage.setItem(PENDING_REF_STORAGE_KEY, clean);
+        localStorage.setItem(PENDING_REF_STORAGE_KEY, liveAction.referralCode);
       } catch {
         // ignore storage errors
       }
-      return clean;
+      return liveAction.referralCode;
+    }
+    if (liveAction.actionTab) {
+      return null;
     }
     if (typeof window !== 'undefined') {
-      const search = new URLSearchParams(window.location.search);
-      const param =
-        search.get('tgWebAppStartParam') ||
-        search.get('startapp') ||
-        search.get('start_param') ||
-        search.get('ref') ||
-        '';
-      if (param.trim()) {
-        const clean = param.trim();
-        try {
-          localStorage.setItem(PENDING_REF_STORAGE_KEY, clean);
-        } catch {
-          // ignore storage errors
-        }
-        return clean;
-      }
       try {
         const stored = localStorage.getItem(PENDING_REF_STORAGE_KEY);
-        if (stored?.trim()) {
-          return stored.trim();
+        const storedAction = parseStartAppAction(stored);
+        if (storedAction.referralCode) {
+          return storedAction.referralCode;
+        }
+        if (stored) {
+          localStorage.removeItem(PENDING_REF_STORAGE_KEY);
         }
       } catch {
         // ignore storage errors
@@ -605,6 +611,10 @@ export default function App() {
   });
   const pendingRefCodeRef = useRef<string | null>(pendingRefCode);
   pendingRefCodeRef.current = pendingRefCode;
+  const dataResetInFlightRef = useRef(false);
+  const goldenEggClaimInFlightRef = useRef(false);
+  const latestTransactionsRef = useRef<TransactionEntry[]>(transactions);
+  latestTransactionsRef.current = transactions;
   const referralAttemptedKeysRef = useRef<Set<string>>(new Set());
   const welcomeCheckedForPlayerRef = useRef<string | null>(null);
   const ensurePromiseRef = useRef<Promise<UserFarmProfile | void>>(Promise.resolve());
@@ -709,35 +719,58 @@ export default function App() {
   }, [isBanned, musicEnabled]);
 
   useEffect(() => {
-    // Re-check Telegram WebApp hydration shortly after mount in case SDK populates asynchronously
-    if (detectedIdentity.isTelegramDetected && pendingRefCodeRef.current) return;
-    const timers = [150, 500, 1200].map((delay) =>
-      window.setTimeout(() => {
-        const next = resolveActivePlayerIdentity();
-        if (next.startParam && next.startParam.trim() !== (pendingRefCodeRef.current || '')) {
-          const clean = next.startParam.trim();
-          pendingRefCodeRef.current = clean;
-          setPendingRefCode(clean);
+    const syncIdentityAndStartParam = () => {
+      ensureTelegramWebAppReady();
+      const next = resolveActivePlayerIdentity();
+      const rawStartParam = next.startParam || getBrowserStartParam();
+      const parsed = parseStartAppAction(rawStartParam);
+
+      if (parsed.actionTab) {
+        setActiveTab(parsed.actionTab);
+        if (pendingRefCodeRef.current && parseStartAppAction(pendingRefCodeRef.current).actionTab) {
+          pendingRefCodeRef.current = null;
+          setPendingRefCode(null);
           try {
-            localStorage.setItem(PENDING_REF_STORAGE_KEY, clean);
+            localStorage.removeItem(PENDING_REF_STORAGE_KEY);
           } catch {
             // ignore storage errors
           }
         }
-        if (next.isTelegramDetected && next.playerId && next.playerId !== activePlayerId) {
-          setDetectedIdentity(next);
-          const cached = loadCachedPlayerProfile(next.playerId);
-          if (cached) {
-            latestProfileRef.current = cached;
-            setProfile(cached);
-          }
+      } else if (parsed.referralCode && parsed.referralCode !== pendingRefCodeRef.current) {
+        pendingRefCodeRef.current = parsed.referralCode;
+        setPendingRefCode(parsed.referralCode);
+        try {
+          localStorage.setItem(PENDING_REF_STORAGE_KEY, parsed.referralCode);
+        } catch {
+          // ignore storage errors
         }
-      }, delay),
-    );
+      }
+
+      if (next.isTelegramDetected && next.playerId && next.playerId !== activePlayerIdRef.current) {
+        setDetectedIdentity(next);
+        const cached = loadCachedPlayerProfile(next.playerId);
+        if (cached) {
+          latestProfileRef.current = cached;
+          setProfile(cached);
+        }
+      } else if (next.isTelegramDetected && !detectedIdentity.isTelegramDetected) {
+        setDetectedIdentity(next);
+      }
+    };
+
+    syncIdentityAndStartParam();
+    const timers = detectedIdentity.isTelegramDetected
+      ? []
+      : [50, 150, 400, 900, 1800].map((delay) =>
+          window.setTimeout(syncIdentityAndStartParam, delay),
+        );
+    const unsubActivated = subscribeTelegramAppActivated(syncIdentityAndStartParam);
+
     return () => {
       timers.forEach((id) => window.clearTimeout(id));
+      unsubActivated();
     };
-  }, [activePlayerId, detectedIdentity.isTelegramDetected]);
+  }, [detectedIdentity.isTelegramDetected]);
 
   useEffect(() => {
     if (playerSessionTokenRef.current) return;
@@ -993,14 +1026,20 @@ export default function App() {
     const targetUid = activePlayerIdRef.current;
     if (!targetUid || !epochMs) return;
     const seenEpochKey = `chickenland_reset_epoch_${targetUid}`;
+    const liveLaunchRef = parseStartAppAction(getBrowserStartParam()).referralCode;
     try {
       localStorage.setItem(seenEpochKey, String(epochMs));
       localStorage.removeItem(`chickenland_profile_cache_v1_${targetUid}`);
       localStorage.removeItem(`chickenland_channels_verified_v1_${targetUid}`);
       localStorage.removeItem(`alphagram_referral_verified_v1_${targetUid}`);
       localStorage.removeItem(`alphagram_verified_tasks_v1_${targetUid}`);
-      localStorage.removeItem('chickenland_pending_ref_v1');
+      if (liveLaunchRef) {
+        localStorage.setItem(PENDING_REF_STORAGE_KEY, liveLaunchRef);
+      } else {
+        localStorage.removeItem('chickenland_pending_ref_v1');
+      }
       localStorage.removeItem(`chickenland_signup_bonus_seen_${targetUid}`);
+      clearStoredGoldenEggClaimAtMs(targetUid);
     } catch {
       // ignore storage errors
     }
@@ -1032,8 +1071,8 @@ export default function App() {
     setAllWithdrawRequests([]);
     setBannedUsers([]);
     setChannelCheckError(null);
-    setPendingRefCode(null);
-    pendingRefCodeRef.current = null;
+    setPendingRefCode(liveLaunchRef);
+    pendingRefCodeRef.current = liveLaunchRef;
     referralAttemptedKeysRef.current.clear();
     claimPendingAttemptsRef.current = { uid: '', count: 0, resolved: false };
     prevWithdrawalStatusRef.current = null;
@@ -1106,11 +1145,13 @@ export default function App() {
     setIsPlayerSynced(false);
 
     const handlePlayerCallbacks = {
-      onProfile: (p: UserFarmProfile) => {
+      onProfile: (p: UserFarmProfile, meta?: { fromCache: boolean }) => {
         setStoredLanguage(p.language, p.uid);
         latestProfileRef.current = p;
         setProfile(p);
-        setIsPlayerSynced(true);
+        if (!meta?.fromCache) {
+          setIsPlayerSynced(true);
+        }
       },
       onTransactions: (txs: TransactionEntry[]) => setTransactions(txs),
       onReferralTransactions: (refTxs: TransactionEntry[]) => setReferralTransactions(refTxs),
@@ -1287,7 +1328,19 @@ export default function App() {
 
   // Reliably link pending referral once player is synced (waits for Telegram SDK hydration and sends Bot DM fallback)
   useEffect(() => {
-    const refCode = (pendingRefCode || '').trim();
+    const parsedRefAction = parseStartAppAction(pendingRefCode);
+    if (parsedRefAction.actionTab) {
+      setActiveTab(parsedRefAction.actionTab);
+      pendingRefCodeRef.current = null;
+      setPendingRefCode(null);
+      try {
+        localStorage.removeItem(PENDING_REF_STORAGE_KEY);
+      } catch {
+        // ignore storage errors
+      }
+      return;
+    }
+    const refCode = (parsedRefAction.referralCode || '').trim();
     if (!refCode || !isPlayerSynced || isBanned) return;
     const currentProfile = latestProfileRef.current;
     if (!currentProfile?.uid || currentProfile.uid !== activePlayerId) return;
@@ -1305,6 +1358,7 @@ export default function App() {
         try {
           const url = new URL(window.location.href);
           url.searchParams.delete('ref');
+          url.searchParams.delete('start');
           url.searchParams.delete('startapp');
           url.searchParams.delete('start_param');
           url.searchParams.delete('tgWebAppStartParam');
@@ -1517,15 +1571,10 @@ export default function App() {
               return;
             }
             if (payload.reason === 'invalid_code') {
-              // Persist direct referral entry and mark local entry verified upon landing
-              void syncDirectReferralRecord(refCode, latestBefore);
-              markReferralVerifiedLocally(refCode);
               clearPendingRef();
               return;
             }
           } else if (payload?.reason === 'invalid_code') {
-            void syncDirectReferralRecord(refCode, latestBefore);
-            markReferralVerifiedLocally(refCode);
             clearPendingRef();
             return;
           }
@@ -1577,13 +1626,9 @@ export default function App() {
           }
 
           const errLow = refRes.error.toLowerCase();
-          if (errLow.includes('not found') || errLow.includes('already')) {
-            if (!errLow.includes('already')) {
-              void syncDirectReferralRecord(refCode, snapshotProfile);
-              markReferralVerifiedLocally(refCode);
-            }
-            clearPendingRef();
-          } else if (
+          if (
+            errLow.includes('not found') ||
+            errLow.includes('already') ||
             errLow.includes('own') ||
             errLow.includes('yourself') ||
             errLow.includes('invalid')
@@ -1600,11 +1645,9 @@ export default function App() {
       void applyReferral();
     };
 
-    const inTelegramWebApp =
-      typeof window !== 'undefined' &&
-      Boolean((window as { Telegram?: { WebApp?: unknown } }).Telegram?.WebApp);
-    if (inTelegramWebApp && !detectedIdentity.isTelegramDetected && !/^tg_/.test(targetUid)) {
-      const hydrationTimer = window.setTimeout(runAttempt, 900);
+    const inActiveTelegramWebView = ensureTelegramWebAppReady();
+    if (inActiveTelegramWebView && !detectedIdentity.isTelegramDetected && !/^tg_/.test(targetUid)) {
+      const hydrationTimer = window.setTimeout(runAttempt, 350);
       return () => window.clearTimeout(hydrationTimer);
     }
 
@@ -3156,11 +3199,18 @@ export default function App() {
     return null;
   };
 
-  const handleExecuteDataReset = async (): Promise<{
+  const handleExecuteDataReset = async (
+    onProgress?: (stage: string) => void,
+  ): Promise<{
     ok: boolean;
     error?: string;
     summary?: string;
   }> => {
+    if (dataResetInFlightRef.current) {
+      return { ok: false, error: 'A system data reset is already in progress.' };
+    }
+    dataResetInFlightRef.current = true;
+
     const completeResetLocally = (epochMs: number, summary?: string) => {
       setSystemResetConfig((prev) => ({
         resetEpochMs: epochMs,
@@ -3180,76 +3230,125 @@ export default function App() {
       return { ok: true, summary };
     };
 
-    const runFirestoreResetFallback = async (): Promise<{
+    const runFirestoreResetFallback = async (
+      serverReason?: string,
+    ): Promise<{
       ok: boolean;
       error?: string;
       summary?: string;
     }> => {
+      let fallbackTimerId: number | null = null;
       try {
-        const fb = await executeDataResetInFirestore(latestProfileRef.current.uid);
+        onProgress?.(
+          serverReason
+            ? `${serverReason} — running direct database reset...`
+            : 'Running direct database reset...',
+        );
+        const fb = await Promise.race([
+          executeDataResetInFirestore(latestProfileRef.current.uid, onProgress),
+          new Promise<never>((_, reject) => {
+            fallbackTimerId = window.setTimeout(
+              () =>
+                reject(
+                  new Error('Database reset timed out after 45s. Please check connection and retry.'),
+                ),
+              45_000,
+            );
+          }),
+        ]);
         return completeResetLocally(fb.resetEpochMs, fb.summary);
       } catch (err) {
-        const errMsg = formatSyncErrorMessage(err, 'Failed to execute system Data Reset.');
-        showToast(errMsg);
-        return { ok: false, error: errMsg };
+        const directMsg = formatSyncErrorMessage(err, 'Failed to execute direct database reset.');
+        const combined = serverReason ? `${serverReason} Direct reset failed: ${directMsg}` : directMsg;
+        showToast(combined);
+        return { ok: false, error: combined };
+      } finally {
+        if (fallbackTimerId !== null) {
+          window.clearTimeout(fallbackTimerId);
+        }
       }
     };
 
-    const tgInitData = getTelegramInitData();
-    const sessionToken = adminSessionTokenRef.current;
-    if (!sessionToken && !tgInitData && isAuthorizedAdmin && adminUnlocked) {
-      return await runFirestoreResetFallback();
-    }
-
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (sessionToken) {
-        headers.Authorization = `Bearer ${sessionToken}`;
-      }
-      if (tgInitData) {
-        headers['x-telegram-init-data'] = tgInitData;
-      }
-      const res = await fetch(resolveApiUrl('/api/admin/data-reset'), {
-        method: 'POST',
-        cache: 'no-store',
-        headers,
-        body: JSON.stringify({
-          token: sessionToken,
-          initData: tgInitData,
-          confirm: 'RESET',
-        }),
-      });
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (
-        !contentType.includes('application/json') ||
-        res.status === 404 ||
-        res.status === 405 ||
-        res.status >= 500
-      ) {
-        return await runFirestoreResetFallback();
-      }
-      const payload = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        resetEpochMs?: number;
-        summary?: string;
-        error?: string;
-      };
-      if (!res.ok || !payload.ok) {
-        if (res.status === 401 || res.status === 403) {
-          if (isAuthorizedAdmin && adminUnlocked) {
-            return await runFirestoreResetFallback();
-          }
-          const errMsg = payload.error || `Data Reset denied (HTTP ${res.status}).`;
-          showToast(errMsg);
-          return { ok: false, error: errMsg };
-        }
+      const tgInitData = getTelegramInitData();
+      const sessionToken = adminSessionTokenRef.current;
+      if (!sessionToken && !tgInitData && isAuthorizedAdmin && adminUnlocked) {
         return await runFirestoreResetFallback();
       }
 
-      const epochMs = Number(payload.resetEpochMs) || Date.now();
-      return completeResetLocally(epochMs, payload.summary);
-    } catch {
-      return await runFirestoreResetFallback();
+      onProgress?.('Requesting server Data Reset (up to 20s)...');
+      const controller = new AbortController();
+      let requestTimedOut = false;
+      const requestTimeoutId = window.setTimeout(() => {
+        requestTimedOut = true;
+        controller.abort();
+      }, 20_000);
+
+      try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (sessionToken) {
+          headers.Authorization = `Bearer ${sessionToken}`;
+        }
+        if (tgInitData) {
+          headers['x-telegram-init-data'] = tgInitData;
+        }
+        const res = await fetch(resolveApiUrl('/api/admin/data-reset'), {
+          method: 'POST',
+          cache: 'no-store',
+          headers,
+          signal: controller.signal,
+          body: JSON.stringify({
+            token: sessionToken,
+            initData: tgInitData,
+            confirm: 'RESET',
+          }),
+        });
+        window.clearTimeout(requestTimeoutId);
+
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+          return await runFirestoreResetFallback('Server endpoint unavailable');
+        }
+
+        const payload = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          resetEpochMs?: number;
+          summary?: string;
+          error?: string;
+        };
+
+        if (!res.ok || !payload.ok) {
+          if (res.status === 400 || res.status === 429) {
+            const errMsg = payload.error || `Data Reset rejected (HTTP ${res.status}).`;
+            showToast(errMsg);
+            return { ok: false, error: errMsg };
+          }
+          if (res.status === 401 || res.status === 403) {
+            if (isAuthorizedAdmin && adminUnlocked) {
+              return await runFirestoreResetFallback('Server admin token expired');
+            }
+            const errMsg = payload.error || `Data Reset denied (HTTP ${res.status}).`;
+            showToast(errMsg);
+            return { ok: false, error: errMsg };
+          }
+          const serverErr = payload.error || `Server error (HTTP ${res.status})`;
+          return await runFirestoreResetFallback(serverErr);
+        }
+
+        const epochMs = Number(payload.resetEpochMs) || Date.now();
+        onProgress?.('Finalizing local farm state...');
+        return completeResetLocally(epochMs, payload.summary);
+      } catch (err) {
+        window.clearTimeout(requestTimeoutId);
+        const reason = requestTimedOut
+          ? 'Server Data Reset timed out after 20s'
+          : err instanceof Error && err.message
+            ? `Server request failed (${err.message})`
+            : 'Unable to reach live Node server';
+        return await runFirestoreResetFallback(reason);
+      }
+    } finally {
+      dataResetInFlightRef.current = false;
     }
   };
 
@@ -5134,23 +5233,96 @@ export default function App() {
     profile,
   ]);
 
-  const handleGoldenEggTap = () => {
-    const now = Date.now();
-    const current = latestProfileRef.current;
-    const res = claimGoldenEggDrop(current, now);
-    if ('error' in res) {
-      playSoftTapSound(soundsEnabled);
-      showToast(res.error);
+  const handleGoldenEggTap = async () => {
+    if (isBannedRef.current) {
+      showToast('Account blocked — actions are disabled.');
       return;
     }
-    playGoldenEggSound(soundsEnabled);
-    triggerHapticFeedback('success');
-    triggerGoldenEggConfetti();
-    void persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-    });
-    showToast(`Golden Egg! +${res.bonusCoins} coins & +${res.xpGained} XP`);
+    if (goldenEggClaimInFlightRef.current) {
+      return;
+    }
+
+    const now = Date.now();
+    const current = latestProfileRef.current;
+    const latestTxGoldenAt = latestTransactionsRef.current.reduce(
+      (maxTs, tx) => (tx.type === 'golden_egg' ? Math.max(maxTs, Number(tx.createdAtMs || 0) || 0) : maxTs),
+      0,
+    );
+    const authoritativeLastAt = Math.max(
+      0,
+      Number(current.lastGoldenEggAtMs ?? 0) || 0,
+      getStoredGoldenEggClaimAtMs(current.uid),
+      latestTxGoldenAt,
+    );
+
+    const localRemainingMs = getGoldenEggCooldownRemainingMs(
+      { lastGoldenEggAtMs: authoritativeLastAt },
+      now,
+    );
+    if (localRemainingMs > 0) {
+      setStoredGoldenEggClaimAtMs(current.uid, authoritativeLastAt);
+      if (authoritativeLastAt > (current.lastGoldenEggAtMs ?? 0)) {
+        const reconciled = { ...current, lastGoldenEggAtMs: authoritativeLastAt };
+        latestProfileRef.current = reconciled;
+        setProfile(reconciled);
+        saveCachedPlayerProfile(reconciled);
+      }
+      playSoftTapSound(soundsEnabled);
+      showToast(`Golden egg recharging (${formatGoldenEggCooldownWait(localRemainingMs)}).`);
+      return;
+    }
+
+    if (!isPlayerSynced) {
+      playSoftTapSound(soundsEnabled);
+      showToast('Syncing your farm data — please wait a second...');
+      return;
+    }
+
+    goldenEggClaimInFlightRef.current = true;
+    try {
+      await ensurePromiseRef.current;
+      const result = await claimGoldenEggInFirestore(
+        { ...latestProfileRef.current, lastGoldenEggAtMs: authoritativeLastAt },
+        now,
+      );
+
+      if (!result.ok) {
+        const serverLastAt = Number(result.lastGoldenEggAtMs ?? 0) || 0;
+        if (serverLastAt > 0) {
+          setStoredGoldenEggClaimAtMs(current.uid, serverLastAt);
+          if (serverLastAt > (latestProfileRef.current.lastGoldenEggAtMs ?? 0)) {
+            const synced = { ...latestProfileRef.current, lastGoldenEggAtMs: serverLastAt };
+            latestProfileRef.current = synced;
+            setProfile(synced);
+            saveCachedPlayerProfile(synced);
+          }
+        }
+        playSoftTapSound(soundsEnabled);
+        showToast(result.error);
+        return;
+      }
+
+      const claimedAt = Number(result.profile.lastGoldenEggAtMs ?? now) || now;
+      setStoredGoldenEggClaimAtMs(result.profile.uid, claimedAt);
+      latestProfileRef.current = result.profile;
+      setProfile(result.profile);
+      saveCachedPlayerProfile(result.profile);
+      setTransactions((prev) => {
+        if (prev.some((t) => t.id === result.transaction.id)) return prev;
+        return [result.transaction, ...prev].slice(0, 60);
+      });
+
+      playGoldenEggSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      triggerGoldenEggConfetti();
+      showToast(`Golden Egg! +${result.bonusCoins} coins & +${result.xpGained} XP`);
+    } catch (err) {
+      showToast(
+        formatSyncErrorMessage(err, 'Could not verify Golden Egg cooldown — check connection and retry.'),
+      );
+    } finally {
+      goldenEggClaimInFlightRef.current = false;
+    }
   };
 
   const handleClaimAchievement = (achievementId: string) => {

@@ -32,6 +32,7 @@ import {
   canAddAdminPlayerId,
   canBanPlayerId,
   canRemoveAdminPlayerId,
+  claimGoldenEggDrop,
   coinsToUsd,
   computeAdminCoinAdjustment,
   computeAdminReferralCountAdjustment,
@@ -55,8 +56,11 @@ import {
   encodeTaskSubtitleMeta,
   extractTelegramNumericUserId,
   filterPlayersBySearchQuery,
+  formatGoldenEggCooldownWait,
   formatReferralHandle,
   getEffectiveAdminIds,
+  getGoldenEggCooldownRemainingMs,
+  GOLDEN_EGG_COOLDOWN_MS,
   isAdminPlayerId,
   matchesAdminRecord,
   normalizePlayerBanId,
@@ -102,6 +106,7 @@ import { detectBrowserTelegramIdentity, type DetectedUserIdentity } from '../uti
 const PLAYER_ID_KEY = 'chickenland_player_id_v1';
 const PLAYER_ID_COOKIE = 'chickenland_uid_v1';
 const PROFILE_CACHE_PREFIX = 'chickenland_profile_cache_v1_';
+const GOLDEN_EGG_CLAIM_CACHE_PREFIX = 'chickenland_golden_egg_at_v1_';
 const BAN_CACHE_PREFIX = 'chickenland_ban_cache_v1_';
 
 function readCookiePlayerId(): string {
@@ -160,6 +165,38 @@ export function setStoredPlayerId(playerId: string): void {
   }
 }
 
+export function getStoredGoldenEggClaimAtMs(playerId: string): number {
+  try {
+    if (typeof localStorage === 'undefined' || !playerId) return 0;
+    const raw = localStorage.getItem(`${GOLDEN_EGG_CLAIM_CACHE_PREFIX}${playerId}`);
+    const parsed = Number(raw || 0);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function setStoredGoldenEggClaimAtMs(playerId: string, timestampMs: number): void {
+  try {
+    if (typeof localStorage === 'undefined' || !playerId) return;
+    const safeTs = Number(timestampMs || 0);
+    if (Number.isFinite(safeTs) && safeTs > 0) {
+      localStorage.setItem(`${GOLDEN_EGG_CLAIM_CACHE_PREFIX}${playerId}`, String(Math.floor(safeTs)));
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function clearStoredGoldenEggClaimAtMs(playerId: string): void {
+  try {
+    if (typeof localStorage === 'undefined' || !playerId) return;
+    localStorage.removeItem(`${GOLDEN_EGG_CLAIM_CACHE_PREFIX}${playerId}`);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export function loadCachedPlayerProfile(playerId: string): UserFarmProfile | null {
   try {
     if (typeof localStorage === 'undefined' || !playerId) return null;
@@ -167,7 +204,12 @@ export function loadCachedPlayerProfile(playerId: string): UserFarmProfile | nul
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (!parsed || typeof parsed !== 'object') return null;
-    return parseProfileDoc(parsed, playerId);
+    const profile = parseProfileDoc(parsed, playerId);
+    const localGoldenAt = getStoredGoldenEggClaimAtMs(playerId);
+    if (localGoldenAt > (profile.lastGoldenEggAtMs ?? 0)) {
+      return { ...profile, lastGoldenEggAtMs: localGoldenAt };
+    }
+    return profile;
   } catch {
     return null;
   }
@@ -176,7 +218,15 @@ export function loadCachedPlayerProfile(playerId: string): UserFarmProfile | nul
 export function saveCachedPlayerProfile(profile: UserFarmProfile): void {
   try {
     if (typeof localStorage === 'undefined' || !profile?.uid) return;
-    localStorage.setItem(`${PROFILE_CACHE_PREFIX}${profile.uid}`, JSON.stringify(profile));
+    const localGoldenAt = getStoredGoldenEggClaimAtMs(profile.uid);
+    const profileGoldenAt = Math.max(0, Number(profile.lastGoldenEggAtMs ?? 0) || 0);
+    const mergedGoldenAt = Math.max(profileGoldenAt, localGoldenAt);
+    const toSave =
+      mergedGoldenAt > profileGoldenAt ? { ...profile, lastGoldenEggAtMs: mergedGoldenAt } : profile;
+    if (mergedGoldenAt > 0) {
+      setStoredGoldenEggClaimAtMs(profile.uid, mergedGoldenAt);
+    }
+    localStorage.setItem(`${PROFILE_CACHE_PREFIX}${profile.uid}`, JSON.stringify(toSave));
   } catch {
     // Ignore quota/storage errors
   }
@@ -448,7 +498,12 @@ export async function ensurePlayerInFirestore(
         try {
           const cachedSnap = await getDocFromCache(playerRef);
           if (cachedSnap.exists()) {
-            const cachedProfile = parseProfileDoc(cachedSnap.data(), playerId);
+            const rawCached = parseProfileDoc(cachedSnap.data(), playerId);
+            const localGoldenAt = getStoredGoldenEggClaimAtMs(playerId);
+            const cachedProfile =
+              localGoldenAt > (rawCached.lastGoldenEggAtMs ?? 0)
+                ? { ...rawCached, lastGoldenEggAtMs: localGoldenAt }
+                : rawCached;
             saveCachedPlayerProfile(cachedProfile);
             return { profile: cachedProfile, isNewPlayer: false, fromCache: true };
           }
@@ -1216,10 +1271,134 @@ export async function commitPlayerMutation(params: {
   }
 }
 
+export async function claimGoldenEggInFirestore(
+  currentProfile: UserFarmProfile,
+  nowMs = Date.now(),
+): Promise<
+  | {
+      ok: true;
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      bonusCoins: number;
+      xpGained: number;
+    }
+  | {
+      ok: false;
+      error: string;
+      lastGoldenEggAtMs?: number;
+      remainingMs?: number;
+    }
+> {
+  const uid = currentProfile.uid;
+  const playerRef = doc(db, 'players', uid);
+  const lbRef = doc(db, 'leaderboard', uid);
+
+  let cooldownBlocked: { lastGoldenEggAtMs: number; remainingMs: number; error: string } | null = null;
+  let claimedResult: {
+    profile: UserFarmProfile;
+    transaction: TransactionEntry;
+    bonusCoins: number;
+    xpGained: number;
+  } | null = null;
+
+  try {
+    await runTransaction(db, async (tx) => {
+      const [playerSnap, lbSnap] = await Promise.all([tx.get(playerRef), tx.get(lbRef)]);
+      const remoteRaw = playerSnap.exists() ? (playerSnap.data() as Record<string, unknown>) : null;
+      const baseProfile: UserFarmProfile = remoteRaw ? parseProfileDoc(remoteRaw, uid) : currentProfile;
+
+      const authoritativeLastAt = Math.max(
+        0,
+        Number(baseProfile.lastGoldenEggAtMs ?? 0) || 0,
+        Number(currentProfile.lastGoldenEggAtMs ?? 0) || 0,
+        getStoredGoldenEggClaimAtMs(uid),
+      );
+      const mergedProfile: UserFarmProfile = {
+        ...baseProfile,
+        lastGoldenEggAtMs: authoritativeLastAt,
+      };
+
+      const remainingMs = getGoldenEggCooldownRemainingMs(mergedProfile, nowMs);
+      if (remainingMs > 0) {
+        cooldownBlocked = {
+          lastGoldenEggAtMs: authoritativeLastAt,
+          remainingMs,
+          error: `Golden egg recharging (${formatGoldenEggCooldownWait(remainingMs)}).`,
+        };
+        return;
+      }
+
+      const dropRes = claimGoldenEggDrop(mergedProfile, nowMs);
+      if ('error' in dropRes) {
+        cooldownBlocked = {
+          lastGoldenEggAtMs: authoritativeLastAt,
+          remainingMs: dropRes.remainingMs ?? GOLDEN_EGG_COOLDOWN_MS,
+          error: dropRes.error,
+        };
+        return;
+      }
+
+      claimedResult = dropRes;
+
+      if (playerSnap.exists()) {
+        tx.update(playerRef, toFirestoreProfilePayload(dropRes.profile, false));
+      } else {
+        tx.set(playerRef, toFirestoreProfilePayload(dropRes.profile, true));
+      }
+
+      if (lbSnap.exists()) {
+        tx.update(lbRef, buildUpdatedLeaderboardFromRaw(lbSnap.data(), dropRes.profile));
+      } else {
+        tx.set(lbRef, toLeaderboardPayload(dropRes.profile));
+      }
+
+      const txId = dropRes.transaction.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+      tx.set(doc(db, 'players', uid, 'transactions', txId), {
+        userId: uid,
+        type: dropRes.transaction.type,
+        title: dropRes.transaction.title.slice(0, 80),
+        amount: dropRes.transaction.amount,
+        currency: dropRes.transaction.currency,
+        usdValue: dropRes.transaction.usdValue,
+        status: dropRes.transaction.status,
+        createdAtMs: dropRes.transaction.createdAtMs,
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    if (cooldownBlocked) {
+      const blocked = cooldownBlocked as { lastGoldenEggAtMs: number; remainingMs: number; error: string };
+      setStoredGoldenEggClaimAtMs(uid, blocked.lastGoldenEggAtMs);
+      return {
+        ok: false,
+        error: blocked.error,
+        lastGoldenEggAtMs: blocked.lastGoldenEggAtMs,
+        remainingMs: blocked.remainingMs,
+      };
+    }
+
+    if (claimedResult) {
+      const res = claimedResult as {
+        profile: UserFarmProfile;
+        transaction: TransactionEntry;
+        bonusCoins: number;
+        xpGained: number;
+      };
+      setStoredGoldenEggClaimAtMs(uid, res.profile.lastGoldenEggAtMs ?? nowMs);
+      saveCachedPlayerProfile(res.profile);
+      return { ok: true, ...res };
+    }
+
+    return { ok: false, error: 'Could not claim Golden Egg right now. Please retry.' };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `players/${uid}`);
+  }
+}
+
 export function subscribeToPlayer(
   playerId: string,
   callbacks: {
-    onProfile: (profile: UserFarmProfile) => void;
+    onProfile: (profile: UserFarmProfile, meta?: { fromCache: boolean }) => void;
     onTransactions: (items: TransactionEntry[]) => void;
     onReferralTransactions?: (items: TransactionEntry[]) => void;
     onDeposits: (items: DepositOrder[]) => void;
@@ -1232,8 +1411,13 @@ export function subscribeToPlayer(
     (snap) => {
       if (snap.exists()) {
         const parsed = parseProfileDoc(snap.data(), playerId);
-        saveCachedPlayerProfile(parsed);
-        callbacks.onProfile(parsed);
+        const localGoldenAt = getStoredGoldenEggClaimAtMs(playerId);
+        const merged =
+          localGoldenAt > (parsed.lastGoldenEggAtMs ?? 0)
+            ? { ...parsed, lastGoldenEggAtMs: localGoldenAt }
+            : parsed;
+        saveCachedPlayerProfile(merged);
+        callbacks.onProfile(merged, { fromCache: snap.metadata.fromCache });
       }
     },
     (err) => logSubscriptionError(`players/${playerId}`, err),
@@ -2654,7 +2838,11 @@ export function subscribeToRecentPlayers(
   return onSnapshot(
     q,
     (snap) => {
-      onUpdate(snap.docs.map((docSnap) => parseProfileDoc(docSnap.data(), docSnap.id)));
+      onUpdate(
+        snap.docs
+          .filter((docSnap) => !isReservedSystemPlayerDocId(docSnap.id))
+          .map((docSnap) => parseProfileDoc(docSnap.data(), docSnap.id)),
+      );
     },
     (err) => logSubscriptionError('players', err),
   );
@@ -3128,7 +3316,9 @@ export async function searchUsersInFirestore(
       getDocs(query(collection(db, 'leaderboard'), limit(50))),
     ]);
 
-    const fetchedProfiles = playersSnap.docs.map((d) => parseProfileDoc(d.data(), d.id));
+    const fetchedProfiles = playersSnap.docs
+      .filter((d) => !isReservedSystemPlayerDocId(d.id))
+      .map((d) => parseProfileDoc(d.data(), d.id));
     for (const matched of filterPlayersBySearchQuery(fetchedProfiles, trimmed)) {
       byUid.set(matched.uid, matched);
     }
@@ -3780,29 +3970,256 @@ export async function saveTaskPricingConfigInFirestore(
   }
 }
 
-export function subscribeToSystemResetConfig(
-  onUpdate: (resetConfig: SystemResetConfig) => void,
-): () => void {
-  return onSnapshot(
-    doc(db, 'app_config', 'system_reset'),
-    (snap) => {
-      if (!snap.exists()) {
-        onUpdate({ resetEpochMs: 0, resetCount: 0, resetBy: '', updatedAtMs: 0 });
-        return;
-      }
-      const d = snap.data();
-      onUpdate({
-        resetEpochMs: Math.max(0, Number(d.resetEpochMs ?? 0) || 0),
-        resetCount: Math.max(0, Math.floor(Number(d.resetCount ?? 0) || 0)),
-        resetBy: String(d.resetBy ?? '').slice(0, 64),
-        updatedAtMs: Math.max(0, Number(d.updatedAtMs ?? 0) || 0),
-      });
-    },
-    (err) => logSubscriptionError('app_config/system_reset', err),
+export const MAINTENANCE_PROFILE_DOC_ID = '__maintenance_cfg__';
+export const SYSTEM_RESET_PROFILE_DOC_ID = '__system_reset__';
+
+export function isReservedSystemPlayerDocId(docId: string): boolean {
+  const clean = String(docId || '').trim();
+  return (
+    clean === ADMIN_PASSCODE_VAULT_UID ||
+    clean === MAINTENANCE_PROFILE_DOC_ID ||
+    clean === SYSTEM_RESET_PROFILE_DOC_ID ||
+    clean.startsWith('__')
   );
 }
 
-export async function executeDataResetInFirestore(adminUid: string): Promise<{
+function encodeMaintenanceTokens(cfg: MaintenanceConfig): string[] {
+  const compact = JSON.stringify({
+    e: cfg.enabled ? 1 : 0,
+    t: cfg.title,
+    m: cfg.message,
+    r: cfg.estimatedReturn,
+    b: cfg.updatedBy,
+    u: cfg.updatedAtMs,
+  });
+  const encoded = encodeURIComponent(compact);
+  const chunks: string[] = ['__maint_v1__'];
+  for (let i = 0; i < encoded.length && chunks.length < 49; i += 52) {
+    chunks.push(encoded.slice(i, i + 52));
+  }
+  return chunks;
+}
+
+function parseMaintenanceFromProfileDoc(data: DocumentData | undefined): MaintenanceConfig | null {
+  if (!data) return null;
+  const tokens = Array.isArray(data.claimedAchievementIds)
+    ? (data.claimedAchievementIds as unknown[]).map((v) => String(v))
+    : [];
+  if (tokens[0] === '__maint_v1__' && tokens.length > 1) {
+    try {
+      const jsonStr = decodeURIComponent(tokens.slice(1).join(''));
+      const parsed = JSON.parse(jsonStr) as {
+        e?: number;
+        t?: string;
+        m?: string;
+        r?: string;
+        b?: string;
+        u?: number;
+      };
+      return resolveMaintenanceConfig({
+        enabled: parsed.e === 1,
+        title: typeof parsed.t === 'string' ? parsed.t : undefined,
+        message: typeof parsed.m === 'string' ? parsed.m : undefined,
+        estimatedReturn: typeof parsed.r === 'string' ? parsed.r : undefined,
+        updatedBy: typeof parsed.b === 'string' ? parsed.b : undefined,
+        updatedAtMs: Math.max(0, Number(parsed.u ?? 0) || 0),
+      });
+    } catch {
+      // Fallback to direct fields
+    }
+  }
+  const hasMirrorSignal =
+    typeof data.referralActivated === 'boolean' &&
+    (String(data.handle || '') === '@maint_cfg' || tokens[0] === '__maint_v1__');
+  if (!hasMirrorSignal) return null;
+  return resolveMaintenanceConfig({
+    enabled: Boolean(data.referralActivated),
+    title: typeof data.displayName === 'string' ? data.displayName : undefined,
+    updatedBy: typeof data.referredBy === 'string' ? data.referredBy : undefined,
+    updatedAtMs: Math.max(0, Number(data.lastCollectedAt ?? 0) || 0),
+  });
+}
+
+function parseSystemResetFromProfileDoc(data: DocumentData | undefined): SystemResetConfig | null {
+  if (!data) return null;
+  const tokens = Array.isArray(data.claimedAchievementIds)
+    ? (data.claimedAchievementIds as unknown[]).map((v) => String(v))
+    : [];
+  if (tokens[0] !== '__sys_reset_v1__' && String(data.handle || '') !== '@sys_reset') {
+    return null;
+  }
+  const resetEpochMs = Math.max(0, Number(data.lastCollectedAt ?? 0) || 0);
+  const resetCount = Math.max(0, Math.floor(Number(data.xp ?? 0) || 0));
+  const updatedAtMs = Math.max(resetEpochMs, Number(tokens[1] ?? 0) || 0);
+  return {
+    resetEpochMs,
+    resetCount,
+    resetBy: String(data.referredBy ?? '').slice(0, 64),
+    updatedAtMs,
+  };
+}
+
+async function upsertReservedPlayerConfigDoc(params: {
+  docId: string;
+  referralCode: string;
+  displayName: string;
+  handle: string;
+  xp: number;
+  referredBy: string;
+  referralActivated: boolean;
+  lastCollectedAt: number;
+  claimedAchievementIds: string[];
+}): Promise<void> {
+  const ref = doc(db, 'players', params.docId);
+  const snap = await getDocFromServer(ref).catch(() => getDoc(ref));
+  const nowMs = Date.now();
+  const mutableFields = {
+    displayName: params.displayName.slice(0, 60) || 'System Config',
+    handle: params.handle.slice(0, 40) || '@sys_cfg',
+    photoUrl: '',
+    avatarColor: '#F59E0B',
+    level: 1,
+    xp: Math.max(0, Math.floor(params.xp)),
+    coins: 0,
+    eggs: 0,
+    totalEggsCollected: 0,
+    totalCashEarnedUsd: 0,
+    totalWithdrawnUsd: 0,
+    basketCapacity: 300,
+    basketTierHours: 8,
+    leghornCount: 0,
+    rhodeCount: 0,
+    orpingtonCount: 0,
+    australorpCount: 0,
+    boughtThisWeek: 0,
+    dailyStreak: 0,
+    lastDailyClaimDate: '',
+    completedTaskIds: [] as string[],
+    claimedPromoCodes: [] as string[],
+    watchedAdsCount: 0,
+    referredBy: params.referredBy.slice(0, 64),
+    referralActivated: Boolean(params.referralActivated),
+    referralCount: 0,
+    referralCoinsEarned: 0,
+    firstDepositBonusUsed: false,
+    language: 'en',
+    lastCollectedAt: Math.max(0, Number(params.lastCollectedAt) || 0),
+    feedBoostUntilMs: 0,
+    lastGoldenEggAtMs: 0,
+    goldenEggsFound: 0,
+    claimedAchievementIds: params.claimedAchievementIds.slice(0, 50),
+    claimedReferralMilestones: [] as number[],
+    updatedAt: serverTimestamp(),
+  };
+
+  if (snap.exists()) {
+    await updateDoc(ref, mutableFields);
+  } else {
+    await setDoc(ref, {
+      uid: params.docId,
+      referralCode: params.referralCode.slice(0, 32),
+      createdAtMs: nowMs,
+      createdAt: serverTimestamp(),
+      ...mutableFields,
+    });
+  }
+}
+
+async function withResetTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs);
+      }),
+    ]);
+  } catch {
+    return fallback;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+export function subscribeToSystemResetConfig(
+  onUpdate: (resetConfig: SystemResetConfig) => void,
+): () => void {
+  let appReset: SystemResetConfig | null = null;
+  let mirrorReset: SystemResetConfig | null = null;
+  let appResolved = false;
+  let mirrorResolved = false;
+
+  const emitLatest = () => {
+    if (appReset && mirrorReset) {
+      onUpdate(
+        mirrorReset.resetEpochMs >= appReset.resetEpochMs ? mirrorReset : appReset,
+      );
+      return;
+    }
+    if (appReset) {
+      onUpdate(appReset);
+      return;
+    }
+    if (mirrorReset) {
+      onUpdate(mirrorReset);
+      return;
+    }
+    if (appResolved && mirrorResolved) {
+      onUpdate({ resetEpochMs: 0, resetCount: 0, resetBy: '', updatedAtMs: 0 });
+    }
+  };
+
+  const unsubApp = onSnapshot(
+    doc(db, 'app_config', 'system_reset'),
+    (snap) => {
+      appResolved = true;
+      if (snap.exists()) {
+        const d = snap.data();
+        appReset = {
+          resetEpochMs: Math.max(0, Number(d.resetEpochMs ?? 0) || 0),
+          resetCount: Math.max(0, Math.floor(Number(d.resetCount ?? 0) || 0)),
+          resetBy: String(d.resetBy ?? '').slice(0, 64),
+          updatedAtMs: Math.max(0, Number(d.updatedAtMs ?? 0) || 0),
+        };
+      } else {
+        appReset = null;
+      }
+      emitLatest();
+    },
+    (err) => {
+      appResolved = true;
+      logSubscriptionError('app_config/system_reset', err);
+      emitLatest();
+    },
+  );
+
+  const unsubMirror = onSnapshot(
+    doc(db, 'players', SYSTEM_RESET_PROFILE_DOC_ID),
+    (snap) => {
+      mirrorResolved = true;
+      mirrorReset = snap.exists() ? parseSystemResetFromProfileDoc(snap.data()) : null;
+      emitLatest();
+    },
+    () => {
+      mirrorResolved = true;
+      emitLatest();
+    },
+  );
+
+  return () => {
+    unsubApp();
+    unsubMirror();
+  };
+}
+
+export async function executeDataResetInFirestore(
+  adminUid: string,
+  onProgress?: (stage: string) => void,
+): Promise<{
   resetEpochMs: number;
   playersResetCount: number;
   tasksDeletedCount: number;
@@ -3821,6 +4238,14 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
   let bansDeletedCount = 0;
   let withdrawalsRejectedCount = 0;
 
+  const getDocsSafe = async (q: Query<DocumentData>, timeoutMs = 10_000): Promise<QuerySnapshot<DocumentData> | null> => {
+    return await withResetTimeout<QuerySnapshot<DocumentData> | null>(
+      getDocsFromServer(q).catch(() => getDocs(q)),
+      timeoutMs,
+      null,
+    );
+  };
+
   const runConcurrent = async <T>(
     items: readonly T[],
     concurrency: number,
@@ -3834,7 +4259,7 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
   const deleteCollectionPaged = async (colName: string, pageSize: number): Promise<number> => {
     let removed = 0;
     let lastCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-    for (let page = 0; page < 50; page++) {
+    for (let page = 0; page < 20; page++) {
       const colQ: Query<DocumentData> = lastCursor
         ? query(
             collection(db, colName),
@@ -3843,11 +4268,11 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
             limit(pageSize),
           )
         : query(collection(db, colName), orderBy('__name__'), limit(pageSize));
-      const snap: QuerySnapshot<DocumentData> = await getDocsFromServer(colQ);
-      if (snap.empty) break;
+      const snap = await getDocsSafe(colQ, 8_000);
+      if (!snap || snap.empty) break;
       await runConcurrent(snap.docs, 20, async (d) => {
         try {
-          await deleteDoc(d.ref);
+          await withResetTimeout(deleteDoc(d.ref), 5_000, undefined);
           removed += 1;
         } catch {
           // Skip docs that fail rule validation
@@ -3860,6 +4285,7 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
   };
 
   try {
+    onProgress?.('Clearing tasks, promo codes & bans...');
     const [delTasks, delPromos, delBans] = await Promise.all([
       deleteCollectionPaged('tasks', 100),
       deleteCollectionPaged('promo_codes', 50),
@@ -3869,40 +4295,36 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
     promosDeletedCount = delPromos;
     bansDeletedCount = delBans;
 
-    // Reject pending withdraw_requests (rules disallow delete on withdraw_requests)
-    let lastWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-    for (let page = 0; page < 50; page++) {
-      const wdQ: Query<DocumentData> = lastWdCursor
-        ? query(
-            collection(db, 'withdraw_requests'),
-            orderBy('__name__'),
-            startAfter(lastWdCursor),
-            limit(100),
-          )
-        : query(collection(db, 'withdraw_requests'), orderBy('__name__'), limit(100));
-      const wdSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(wdQ);
-      if (wdSnap.empty) break;
-      const pendingWds = wdSnap.docs.filter((d) => String(d.data()?.status || '') === 'pending');
-      await runConcurrent(pendingWds, 20, async (d) => {
+    onProgress?.('Closing pending withdrawal requests...');
+    for (let page = 0; page < 10; page++) {
+      const wdSnap = await getDocsSafe(
+        query(collection(db, 'withdraw_requests'), where('status', '==', 'pending'), limit(100)),
+        8_000,
+      );
+      if (!wdSnap || wdSnap.empty) break;
+      await runConcurrent(wdSnap.docs, 20, async (d) => {
         try {
-          await updateDoc(d.ref, {
-            status: 'rejected',
-            adminNote: 'System reset by Admin',
-            reviewedAtMs: nowMs,
-            updatedAt: serverTimestamp(),
-          });
+          await withResetTimeout(
+            updateDoc(d.ref, {
+              status: 'rejected',
+              adminNote: 'System reset by Admin',
+              reviewedAtMs: nowMs,
+              updatedAt: serverTimestamp(),
+            }),
+            5_000,
+            undefined,
+          );
           withdrawalsRejectedCount += 1;
         } catch {
           // Best-effort
         }
       });
-      lastWdCursor = wdSnap.docs[wdSnap.docs.length - 1];
       if (wdSnap.size < 100) break;
     }
 
-    // Reset all player profiles & clean referrals/pending records (preserve __admin_vault__)
+    onProgress?.('Resetting player farms & referrals...');
     let lastPlayerCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-    for (let page = 0; page < 100; page++) {
+    for (let page = 0; page < 50; page++) {
       const pQ: Query<DocumentData> = lastPlayerCursor
         ? query(
             collection(db, 'players'),
@@ -3911,14 +4333,14 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
             limit(50),
           )
         : query(collection(db, 'players'), orderBy('__name__'), limit(50));
-      const pSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(pQ);
-      if (pSnap.empty) break;
+      const pSnap = await getDocsSafe(pQ, 10_000);
+      if (!pSnap || pSnap.empty) break;
 
-      const playerDocs = pSnap.docs.filter((d) => d.id !== ADMIN_PASSCODE_VAULT_UID);
+      const playerDocs = pSnap.docs.filter((d) => !isReservedSystemPlayerDocId(d.id));
       await runConcurrent(playerDocs, 10, async (d) => {
         const cleanReferrals = async () => {
           let lastRefCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-          for (let rPage = 0; rPage < 40; rPage++) {
+          for (let rPage = 0; rPage < 15; rPage++) {
             const rQ: Query<DocumentData> = lastRefCursor
               ? query(
                   collection(db, 'players', d.id, 'referrals'),
@@ -3927,11 +4349,11 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
                   limit(50),
                 )
               : query(collection(db, 'players', d.id, 'referrals'), orderBy('__name__'), limit(50));
-            const refSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(rQ);
-            if (refSnap.empty) break;
+            const refSnap = await getDocsSafe(rQ, 6_000);
+            if (!refSnap || refSnap.empty) break;
             await runConcurrent(refSnap.docs, 15, async (rDoc) => {
               try {
-                await deleteDoc(rDoc.ref);
+                await withResetTimeout(deleteDoc(rDoc.ref), 4_000, undefined);
                 referralsDeletedCount += 1;
               } catch {
                 // Best-effort
@@ -3943,64 +4365,53 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
         };
 
         const rejectWithdrawals = async () => {
-          let lastUserWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-          for (let wPage = 0; wPage < 20; wPage++) {
-            const uWdQ: Query<DocumentData> = lastUserWdCursor
-              ? query(
-                  collection(db, 'players', d.id, 'withdrawals'),
-                  orderBy('__name__'),
-                  startAfter(lastUserWdCursor),
-                  limit(40),
-                )
-              : query(collection(db, 'players', d.id, 'withdrawals'), orderBy('__name__'), limit(40));
-            const uWdSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(uWdQ);
-            if (uWdSnap.empty) break;
-            const pending = uWdSnap.docs.filter((wDoc) => {
-              const st = String(wDoc.data()?.status || '');
-              return st === 'pending' || st === 'processing';
-            });
-            await runConcurrent(pending, 10, async (wDoc) => {
-              try {
-                await updateDoc(wDoc.ref, {
+          const uWdSnap = await getDocsSafe(
+            query(
+              collection(db, 'players', d.id, 'withdrawals'),
+              where('status', 'in', ['pending', 'processing']),
+              limit(40),
+            ),
+            6_000,
+          );
+          if (!uWdSnap || uWdSnap.empty) return;
+          await runConcurrent(uWdSnap.docs, 10, async (wDoc) => {
+            try {
+              await withResetTimeout(
+                updateDoc(wDoc.ref, {
                   status: 'rejected',
                   adminNote: 'System reset by Admin',
                   reviewedAtMs: nowMs,
-                });
-              } catch {
-                // Best-effort
-              }
-            });
-            lastUserWdCursor = uWdSnap.docs[uWdSnap.docs.length - 1];
-            if (uWdSnap.size < 40) break;
-          }
+                }),
+                4_000,
+                undefined,
+              );
+            } catch {
+              // Best-effort
+            }
+          });
         };
 
         const rejectTransactions = async () => {
-          let lastUserTxCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-          for (let tPage = 0; tPage < 20; tPage++) {
-            const uTxQ: Query<DocumentData> = lastUserTxCursor
-              ? query(
-                  collection(db, 'players', d.id, 'transactions'),
-                  orderBy('__name__'),
-                  startAfter(lastUserTxCursor),
-                  limit(60),
-                )
-              : query(collection(db, 'players', d.id, 'transactions'), orderBy('__name__'), limit(60));
-            const uTxSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(uTxQ);
-            if (uTxSnap.empty) break;
-            const pending = uTxSnap.docs.filter(
-              (tDoc) => String(tDoc.data()?.status || '') === 'pending',
-            );
-            await runConcurrent(pending, 15, async (tDoc) => {
-              try {
-                await updateDoc(tDoc.ref, { status: 'rejected' });
-              } catch {
-                // Best-effort
-              }
-            });
-            lastUserTxCursor = uTxSnap.docs[uTxSnap.docs.length - 1];
-            if (uTxSnap.size < 60) break;
-          }
+          const uTxSnap = await getDocsSafe(
+            query(
+              collection(db, 'players', d.id, 'transactions'),
+              where('status', '==', 'pending'),
+              limit(60),
+            ),
+            6_000,
+          );
+          if (!uTxSnap || uTxSnap.empty) return;
+          await runConcurrent(uTxSnap.docs, 15, async (tDoc) => {
+            try {
+              await withResetTimeout(
+                updateDoc(tDoc.ref, { status: 'rejected' }),
+                4_000,
+                undefined,
+              );
+            } catch {
+              // Best-effort
+            }
+          });
         };
 
         await Promise.all([cleanReferrals(), rejectWithdrawals(), rejectTransactions()]);
@@ -4014,45 +4425,49 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
         const safeLang = rawLang.length >= 2 ? rawLang : 'en';
 
         try {
-          await updateDoc(d.ref, {
-            displayName: safeName,
-            handle: safeHandle,
-            photoUrl: String(pd.photoUrl || '').slice(0, 512),
-            avatarColor: safeColor,
-            language: safeLang,
-            level: 1,
-            xp: 0,
-            coins: SIGNUP_BONUS_COINS,
-            eggs: 0,
-            totalEggsCollected: 0,
-            totalCashEarnedUsd: 0,
-            totalWithdrawnUsd: 0,
-            basketCapacity: 300,
-            basketTierHours: 8,
-            leghornCount: 0,
-            rhodeCount: 0,
-            orpingtonCount: 0,
-            australorpCount: 0,
-            boughtThisWeek: 0,
-            dailyStreak: 0,
-            lastDailyClaimDate: '',
-            completedTaskIds: [],
-            claimedPromoCodes: [],
-            watchedAdsCount: 0,
-            totalAdsWatched: 0,
-            referredBy: '',
-            referralActivated: false,
-            referralCount: 0,
-            referralCoinsEarned: 0,
-            firstDepositBonusUsed: false,
-            lastCollectedAt: nowMs,
-            feedBoostUntilMs: 0,
-            lastGoldenEggAtMs: 0,
-            goldenEggsFound: 0,
-            claimedAchievementIds: resetTokens,
-            claimedReferralMilestones: [],
-            updatedAt: serverTimestamp(),
-          });
+          await withResetTimeout(
+            updateDoc(d.ref, {
+              displayName: safeName,
+              handle: safeHandle,
+              photoUrl: String(pd.photoUrl || '').slice(0, 512),
+              avatarColor: safeColor,
+              language: safeLang,
+              level: 1,
+              xp: 0,
+              coins: SIGNUP_BONUS_COINS,
+              eggs: 0,
+              totalEggsCollected: 0,
+              totalCashEarnedUsd: 0,
+              totalWithdrawnUsd: 0,
+              basketCapacity: 300,
+              basketTierHours: 8,
+              leghornCount: 0,
+              rhodeCount: 0,
+              orpingtonCount: 0,
+              australorpCount: 0,
+              boughtThisWeek: 0,
+              dailyStreak: 0,
+              lastDailyClaimDate: '',
+              completedTaskIds: [],
+              claimedPromoCodes: [],
+              watchedAdsCount: 0,
+              totalAdsWatched: 0,
+              referredBy: '',
+              referralActivated: false,
+              referralCount: 0,
+              referralCoinsEarned: 0,
+              firstDepositBonusUsed: false,
+              lastCollectedAt: nowMs,
+              feedBoostUntilMs: 0,
+              lastGoldenEggAtMs: 0,
+              goldenEggsFound: 0,
+              claimedAchievementIds: resetTokens,
+              claimedReferralMilestones: [],
+              updatedAt: serverTimestamp(),
+            }),
+            6_000,
+            undefined,
+          );
           playersResetCount += 1;
         } catch {
           // Best-effort on individual malformed legacy doc
@@ -4062,9 +4477,9 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
       if (pSnap.size < 50) break;
     }
 
-    // Reset leaderboard scores
+    onProgress?.('Resetting leaderboard scores...');
     let lastLbCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-    for (let page = 0; page < 100; page++) {
+    for (let page = 0; page < 50; page++) {
       const lbQ: Query<DocumentData> = lastLbCursor
         ? query(
             collection(db, 'leaderboard'),
@@ -4073,19 +4488,23 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
             limit(50),
           )
         : query(collection(db, 'leaderboard'), orderBy('__name__'), limit(50));
-      const lbSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(lbQ);
-      if (lbSnap.empty) break;
-      const lbDocs = lbSnap.docs.filter((d) => d.id !== ADMIN_PASSCODE_VAULT_UID);
+      const lbSnap = await getDocsSafe(lbQ, 8_000);
+      if (!lbSnap || lbSnap.empty) break;
+      const lbDocs = lbSnap.docs.filter((d) => !isReservedSystemPlayerDocId(d.id));
       await runConcurrent(lbDocs, 20, async (d) => {
         try {
-          await updateDoc(d.ref, {
-            buyerPoints: 0,
-            inviterCount: 0,
-            eggs: 0,
-            totalEggsCollected: 0,
-            chickensCount: 0,
-            updatedAt: serverTimestamp(),
-          });
+          await withResetTimeout(
+            updateDoc(d.ref, {
+              buyerPoints: 0,
+              inviterCount: 0,
+              eggs: 0,
+              totalEggsCollected: 0,
+              chickensCount: 0,
+              updatedAt: serverTimestamp(),
+            }),
+            5_000,
+            undefined,
+          );
         } catch {
           // Best-effort
         }
@@ -4094,17 +4513,28 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
       if (lbSnap.size < 50) break;
     }
 
-    // Reset season back to Season 1 & update app_config/system_reset epoch
+    onProgress?.('Updating global season & reset epoch...');
     let prevCount = 0;
     try {
-      const resetSnap = await getDocFromServer(doc(db, 'app_config', 'system_reset'));
-      if (resetSnap.exists()) {
-        prevCount = Math.max(0, Math.floor(Number(resetSnap.data()?.resetCount ?? 0) || 0));
-      }
+      const [appSnap, mirrorSnap] = await Promise.all([
+        withResetTimeout(getDocFromServer(doc(db, 'app_config', 'system_reset')), 4_000, null),
+        withResetTimeout(getDocFromServer(doc(db, 'players', SYSTEM_RESET_PROFILE_DOC_ID)), 4_000, null),
+      ]);
+      const appCount = appSnap?.exists()
+        ? Math.max(0, Math.floor(Number(appSnap.data()?.resetCount ?? 0) || 0))
+        : 0;
+      const mirrorCount = mirrorSnap?.exists()
+        ? Math.max(0, Math.floor(Number(mirrorSnap.data()?.xp ?? 0) || 0))
+        : 0;
+      prevCount = Math.max(appCount, mirrorCount);
     } catch {
       prevCount = 0;
     }
-    await Promise.all([
+
+    const nextResetCount = prevCount + 1;
+    const cleanAdminUid = String(adminUid || 'admin').slice(0, 64);
+
+    await withResetTimeout(
       setDoc(doc(db, 'app_config', 'season'), {
         seasonNumber: 1,
         title: 'Harvest Cup Season 1',
@@ -4114,14 +4544,49 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
         updatedAtMs: nowMs,
         updatedAt: serverTimestamp(),
       }),
-      setDoc(doc(db, 'app_config', 'system_reset'), {
-        resetEpochMs: nowMs,
-        resetCount: prevCount + 1,
-        resetBy: String(adminUid || 'admin').slice(0, 64),
-        updatedAtMs: nowMs,
-        updatedAt: serverTimestamp(),
-      }),
+      6_000,
+      undefined,
+    ).catch(() => undefined);
+
+    const [appEpochRes, mirrorEpochRes] = await Promise.allSettled([
+      withResetTimeout(
+        setDoc(doc(db, 'app_config', 'system_reset'), {
+          resetEpochMs: nowMs,
+          resetCount: nextResetCount,
+          resetBy: cleanAdminUid,
+          updatedAtMs: nowMs,
+          updatedAt: serverTimestamp(),
+        }).then(() => true),
+        6_000,
+        false,
+      ),
+      withResetTimeout(
+        upsertReservedPlayerConfigDoc({
+          docId: SYSTEM_RESET_PROFILE_DOC_ID,
+          referralCode: '__RESET__',
+          displayName: 'System Reset Epoch',
+          handle: '@sys_reset',
+          xp: nextResetCount,
+          referredBy: cleanAdminUid,
+          referralActivated: false,
+          lastCollectedAt: nowMs,
+          claimedAchievementIds: ['__sys_reset_v1__', String(nowMs)],
+        }).then(() => true),
+        6_000,
+        false,
+      ),
     ]);
+
+    const epochSaved =
+      (appEpochRes.status === 'fulfilled' && appEpochRes.value) ||
+      (mirrorEpochRes.status === 'fulfilled' && mirrorEpochRes.value);
+    if (!epochSaved) {
+      const reason =
+        (appEpochRes.status === 'rejected' && appEpochRes.reason) ||
+        (mirrorEpochRes.status === 'rejected' && mirrorEpochRes.reason) ||
+        new Error('Could not persist system reset epoch.');
+      throw reason;
+    }
 
     const summary = `${playersResetCount} players reset · ${tasksDeletedCount} tasks, ${promosDeletedCount} promos, ${bansDeletedCount} bans, ${referralsDeletedCount} referrals cleared · ${withdrawalsRejectedCount} pending withdrawals closed`;
     return {
@@ -4142,16 +4607,38 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
 export function subscribeToMaintenanceConfig(
   onUpdate: (config: MaintenanceConfig) => void,
 ): () => void {
-  return onSnapshot(
+  let appCfg: MaintenanceConfig | null = null;
+  let mirrorCfg: MaintenanceConfig | null = null;
+  let appResolved = false;
+  let mirrorResolved = false;
+
+  const emitLatest = () => {
+    if (appCfg && mirrorCfg) {
+      onUpdate(mirrorCfg.updatedAtMs >= appCfg.updatedAtMs ? mirrorCfg : appCfg);
+      return;
+    }
+    if (mirrorCfg) {
+      onUpdate(mirrorCfg);
+      return;
+    }
+    if (appCfg) {
+      onUpdate(appCfg);
+      return;
+    }
+    if (appResolved && mirrorResolved) {
+      onUpdate(DEFAULT_MAINTENANCE_CONFIG);
+    }
+  };
+
+  const unsubApp = onSnapshot(
     doc(db, 'app_config', 'maintenance'),
     (snap) => {
+      appResolved = true;
       if (!snap.exists()) {
-        onUpdate(DEFAULT_MAINTENANCE_CONFIG);
-        return;
-      }
-      const d = snap.data();
-      onUpdate(
-        resolveMaintenanceConfig({
+        appCfg = null;
+      } else {
+        const d = snap.data();
+        appCfg = resolveMaintenanceConfig({
           enabled: Boolean(d.enabled),
           title: typeof d.title === 'string' ? d.title : undefined,
           message: typeof d.message === 'string' ? d.message : undefined,
@@ -4159,11 +4646,34 @@ export function subscribeToMaintenanceConfig(
             typeof d.estimatedReturn === 'string' ? d.estimatedReturn : undefined,
           updatedBy: typeof d.updatedBy === 'string' ? d.updatedBy : undefined,
           updatedAtMs: Number(d.updatedAtMs ?? 0),
-        }),
-      );
+        });
+      }
+      emitLatest();
     },
-    (err) => logSubscriptionError('app_config/maintenance', err),
+    (err) => {
+      appResolved = true;
+      logSubscriptionError('app_config/maintenance', err);
+      emitLatest();
+    },
   );
+
+  const unsubMirror = onSnapshot(
+    doc(db, 'players', MAINTENANCE_PROFILE_DOC_ID),
+    (snap) => {
+      mirrorResolved = true;
+      mirrorCfg = snap.exists() ? parseMaintenanceFromProfileDoc(snap.data()) : null;
+      emitLatest();
+    },
+    () => {
+      mirrorResolved = true;
+      emitLatest();
+    },
+  );
+
+  return () => {
+    unsubApp();
+    unsubMirror();
+  };
 }
 
 export async function saveMaintenanceConfigInFirestore(
@@ -4174,15 +4684,36 @@ export async function saveMaintenanceConfigInFirestore(
     ...input,
     updatedAtMs: nowMs,
   });
-  try {
-    await setDoc(doc(db, 'app_config', 'maintenance'), {
+
+  const [appRes, mirrorRes] = await Promise.allSettled([
+    setDoc(doc(db, 'app_config', 'maintenance'), {
       ...payload,
       updatedAt: serverTimestamp(),
-    });
+    }),
+    upsertReservedPlayerConfigDoc({
+      docId: MAINTENANCE_PROFILE_DOC_ID,
+      referralCode: '__MAINT__',
+      displayName: payload.title.slice(0, 60) || 'Scheduled Maintenance',
+      handle: '@maint_cfg',
+      xp: 0,
+      referredBy: payload.updatedBy.slice(0, 64),
+      referralActivated: Boolean(payload.enabled),
+      lastCollectedAt: payload.updatedAtMs,
+      claimedAchievementIds: encodeMaintenanceTokens(payload),
+    }),
+  ]);
+
+  if (appRes.status === 'fulfilled' || mirrorRes.status === 'fulfilled') {
     return payload;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, 'app_config/maintenance');
   }
+
+  const primaryError =
+    mirrorRes.status === 'rejected'
+      ? mirrorRes.reason
+      : appRes.status === 'rejected'
+        ? appRes.reason
+        : new Error('Unable to save maintenance configuration.');
+  handleFirestoreError(primaryError, OperationType.WRITE, 'app_config/maintenance');
 }
 
 

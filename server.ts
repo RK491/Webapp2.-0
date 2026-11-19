@@ -286,6 +286,40 @@ const TELEGRAM_MINIAPP_SHORT_NAME =
       process.env.VITE_TELEGRAM_MINIAPP_SHORT_NAME ||
       '',
   ) || DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME;
+
+let cachedBotMenuWebAppUrl = (() => {
+  const raw = (process.env.WEBAPP_URL || process.env.VITE_WEBAPP_URL || '').trim();
+  return /^https:\/\/[^\s]+$/i.test(raw) ? raw : '';
+})();
+
+function buildTelegramMiniAppLink(botUsername: string, startParam?: string): string {
+  const cleanBot = normalizeTelegramBotUsername(botUsername) || DEFAULT_TELEGRAM_BOT_USERNAME;
+  const base = TELEGRAM_MINIAPP_SHORT_NAME
+    ? `https://t.me/${cleanBot}/${TELEGRAM_MINIAPP_SHORT_NAME}`
+    : `https://t.me/${cleanBot}`;
+  const cleanParam = String(startParam || '').trim();
+  return cleanParam ? `${base}?startapp=${encodeURIComponent(cleanParam)}` : base;
+}
+
+function buildDirectPrivateMiniAppButton(
+  text: string,
+  botUsername: string,
+  startParam?: string,
+): { text: string; web_app?: { url: string }; url?: string } {
+  if (cachedBotMenuWebAppUrl) {
+    try {
+      const target = new URL(cachedBotMenuWebAppUrl);
+      const cleanParam = String(startParam || '').trim();
+      if (cleanParam) {
+        target.searchParams.set('startapp', cleanParam);
+      }
+      return { text, web_app: { url: target.toString() } };
+    } catch {
+      // Fallback to t.me link
+    }
+  }
+  return { text, url: buildTelegramMiniAppLink(botUsername, startParam) };
+}
 const TONCENTER_API_KEY = (process.env.TONCENTER_API_KEY || '').trim();
 const ADMIN_TELEGRAM_IDS = (process.env.ADMIN_TELEGRAM_IDS || '')
   .split(',')
@@ -464,6 +498,26 @@ const SESSION_SIGNING_SECRET = resolveSessionSigningSecret();
 let cachedBotUsername = runtimeBotConfig?.botUsername || TELEGRAM_BOT_USERNAME_ENV || '';
 let lastBotLookupAttemptMs = 0;
 
+async function refreshBotMenuWebAppUrl(botToken: string): Promise<void> {
+  if (!botToken) return;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/getChatMenuButton`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!res.ok) return;
+    const data = (await res.json().catch(() => null)) as {
+      ok?: boolean;
+      result?: { type?: string; web_app?: { url?: string } };
+    } | null;
+    const rawUrl = String(data?.result?.web_app?.url || '').trim();
+    if (data?.ok && /^https:\/\/[^\s]+$/i.test(rawUrl)) {
+      cachedBotMenuWebAppUrl = rawUrl;
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
 async function resolveTelegramBotUsername(): Promise<string> {
   if (runtimeBotConfig?.botUsername) return runtimeBotConfig.botUsername;
   if (TELEGRAM_BOT_USERNAME_ENV) return TELEGRAM_BOT_USERNAME_ENV;
@@ -477,9 +531,12 @@ async function resolveTelegramBotUsername(): Promise<string> {
 
   lastBotLookupAttemptMs = now;
   try {
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/getMe`, {
-      signal: AbortSignal.timeout(5000),
-    });
+    const [res] = await Promise.all([
+      fetch(`https://api.telegram.org/bot${botToken}/getMe`, {
+        signal: AbortSignal.timeout(5000),
+      }),
+      !cachedBotMenuWebAppUrl ? refreshBotMenuWebAppUrl(botToken) : Promise.resolve(),
+    ]);
     if (res.ok) {
       const data = (await res.json()) as {
         ok?: boolean;
@@ -742,7 +799,7 @@ async function processDueReminders(): Promise<void> {
 
   try {
     const botUsername = await resolveTelegramBotUsername();
-    const miniAppUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
+    const collectButton = buildDirectPrivateMiniAppButton('🐔 Collect & Manage Farm', botUsername);
 
     const sendReminderDm = async (chatId: string, label: string, text: string) => {
       try {
@@ -754,7 +811,7 @@ async function processDueReminders(): Promise<void> {
             text,
             parse_mode: 'HTML',
             reply_markup: {
-              inline_keyboard: [[{ text: '🐔 Collect & Manage Farm', url: miniAppUrl }]],
+              inline_keyboard: [[collectButton]],
             },
           }),
           signal: AbortSignal.timeout(7000),
@@ -1057,18 +1114,153 @@ function persistMaintenanceConfigToDisk(cfg: MaintenanceConfig): void {
   }
 }
 
+const MAINTENANCE_PROFILE_DOC_ID = '__maintenance_cfg__';
+const SYSTEM_RESET_PROFILE_DOC_ID = '__system_reset__';
+
+function encodeMaintenanceMirrorTokens(cfg: MaintenanceConfig): string[] {
+  const compact = JSON.stringify({
+    e: cfg.enabled ? 1 : 0,
+    t: cfg.title,
+    m: cfg.message,
+    r: cfg.estimatedReturn,
+    b: cfg.updatedBy,
+    u: cfg.updatedAtMs,
+  });
+  const encoded = encodeURIComponent(compact);
+  const chunks: string[] = ['__maint_v1__'];
+  for (let i = 0; i < encoded.length && chunks.length < 49; i += 52) {
+    chunks.push(encoded.slice(i, i + 52));
+  }
+  return chunks;
+}
+
+function decodeMaintenanceMirrorDoc(d: DocumentData | undefined): MaintenanceConfig | null {
+  if (!d) return null;
+  const tokens = Array.isArray(d.claimedAchievementIds)
+    ? (d.claimedAchievementIds as unknown[]).map((v) => String(v))
+    : [];
+  if (tokens[0] === '__maint_v1__' && tokens.length > 1) {
+    try {
+      const parsed = JSON.parse(decodeURIComponent(tokens.slice(1).join(''))) as {
+        e?: number;
+        t?: string;
+        m?: string;
+        r?: string;
+        b?: string;
+        u?: number;
+      };
+      return resolveMaintenanceConfig({
+        enabled: parsed.e === 1,
+        title: typeof parsed.t === 'string' ? parsed.t : undefined,
+        message: typeof parsed.m === 'string' ? parsed.m : undefined,
+        estimatedReturn: typeof parsed.r === 'string' ? parsed.r : undefined,
+        updatedBy: typeof parsed.b === 'string' ? parsed.b : undefined,
+        updatedAtMs: Math.max(0, Number(parsed.u ?? 0) || 0),
+      });
+    } catch {
+      // Fallback below
+    }
+  }
+  if (String(d.handle || '') === '@maint_cfg' && typeof d.referralActivated === 'boolean') {
+    return resolveMaintenanceConfig({
+      enabled: Boolean(d.referralActivated),
+      title: typeof d.displayName === 'string' ? d.displayName : undefined,
+      updatedBy: typeof d.referredBy === 'string' ? d.referredBy : undefined,
+      updatedAtMs: Math.max(0, Number(d.lastCollectedAt ?? 0) || 0),
+    });
+  }
+  return null;
+}
+
+async function upsertServerReservedPlayerDoc(params: {
+  docId: string;
+  referralCode: string;
+  displayName: string;
+  handle: string;
+  xp: number;
+  referredBy: string;
+  referralActivated: boolean;
+  lastCollectedAt: number;
+  claimedAchievementIds: string[];
+}): Promise<void> {
+  if (!serverDb) return;
+  const ref = doc(serverDb, 'players', params.docId);
+  const snap = await getFreshDoc(ref);
+  const nowMs = Date.now();
+  const mutableFields = {
+    displayName: params.displayName.slice(0, 60) || 'System Config',
+    handle: params.handle.slice(0, 40) || '@sys_cfg',
+    photoUrl: '',
+    avatarColor: '#F59E0B',
+    level: 1,
+    xp: Math.max(0, Math.floor(params.xp)),
+    coins: 0,
+    eggs: 0,
+    totalEggsCollected: 0,
+    totalCashEarnedUsd: 0,
+    totalWithdrawnUsd: 0,
+    basketCapacity: 300,
+    basketTierHours: 8,
+    leghornCount: 0,
+    rhodeCount: 0,
+    orpingtonCount: 0,
+    australorpCount: 0,
+    boughtThisWeek: 0,
+    dailyStreak: 0,
+    lastDailyClaimDate: '',
+    completedTaskIds: [] as string[],
+    claimedPromoCodes: [] as string[],
+    watchedAdsCount: 0,
+    referredBy: params.referredBy.slice(0, 64),
+    referralActivated: Boolean(params.referralActivated),
+    referralCount: 0,
+    referralCoinsEarned: 0,
+    firstDepositBonusUsed: false,
+    language: 'en',
+    lastCollectedAt: Math.max(0, Number(params.lastCollectedAt) || 0),
+    feedBoostUntilMs: 0,
+    lastGoldenEggAtMs: 0,
+    goldenEggsFound: 0,
+    claimedAchievementIds: params.claimedAchievementIds.slice(0, 50),
+    claimedReferralMilestones: [] as number[],
+    updatedAt: serverTimestamp(),
+  };
+
+  if (snap.exists()) {
+    await updateDoc(ref, mutableFields);
+  } else {
+    await setDoc(ref, {
+      uid: params.docId,
+      referralCode: params.referralCode.slice(0, 32),
+      createdAtMs: nowMs,
+      createdAt: serverTimestamp(),
+      ...mutableFields,
+    });
+  }
+}
+
 async function loadMaintenanceConfigFromFirestore(): Promise<MaintenanceConfig> {
   const disk = loadMaintenanceConfigFromDisk();
   if (!serverDb) return disk || DEFAULT_MAINTENANCE_CONFIG;
   try {
-    const snap = await getFreshDoc(doc(serverDb, 'app_config', 'maintenance'));
-    if (!snap.exists()) return disk || DEFAULT_MAINTENANCE_CONFIG;
-    const remote = resolveMaintenanceConfig(snap.data() as Partial<MaintenanceConfig>);
-    if (disk && disk.updatedAtMs > remote.updatedAtMs) {
-      return disk;
+    const [appSnap, mirrorSnap] = await Promise.all([
+      getFreshDoc(doc(serverDb, 'app_config', 'maintenance')).catch(() => null),
+      getFreshDoc(doc(serverDb, 'players', MAINTENANCE_PROFILE_DOC_ID)).catch(() => null),
+    ]);
+    const candidates: MaintenanceConfig[] = [];
+    if (disk) candidates.push(disk);
+    if (appSnap?.exists()) {
+      candidates.push(resolveMaintenanceConfig(appSnap.data() as Partial<MaintenanceConfig>));
     }
-    persistMaintenanceConfigToDisk(remote);
-    return remote;
+    if (mirrorSnap?.exists()) {
+      const parsedMirror = decodeMaintenanceMirrorDoc(mirrorSnap.data());
+      if (parsedMirror) candidates.push(parsedMirror);
+    }
+    if (candidates.length === 0) return DEFAULT_MAINTENANCE_CONFIG;
+    candidates.sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0));
+    const best = candidates[0];
+    persistMaintenanceConfigToDisk(best);
+    return best;
   } catch {
     return disk || DEFAULT_MAINTENANCE_CONFIG;
   }
@@ -1088,17 +1280,29 @@ async function saveMaintenanceConfigOnServer(
   });
   persistMaintenanceConfigToDisk(resolved);
   if (serverDb) {
-    try {
-      await setDoc(doc(serverDb, 'app_config', 'maintenance'), {
+    const [appRes, mirrorRes] = await Promise.allSettled([
+      setDoc(doc(serverDb, 'app_config', 'maintenance'), {
         ...resolved,
         updatedAt: serverTimestamp(),
-      });
-    } catch (err) {
+      }),
+      upsertServerReservedPlayerDoc({
+        docId: MAINTENANCE_PROFILE_DOC_ID,
+        referralCode: '__MAINT__',
+        displayName: resolved.title.slice(0, 60) || 'Scheduled Maintenance',
+        handle: '@maint_cfg',
+        xp: 0,
+        referredBy: resolved.updatedBy.slice(0, 64),
+        referralActivated: Boolean(resolved.enabled),
+        lastCollectedAt: resolved.updatedAtMs,
+        claimedAchievementIds: encodeMaintenanceMirrorTokens(resolved),
+      }),
+    ]);
+    if (appRes.status === 'rejected' && mirrorRes.status === 'rejected') {
       recordServerLog(
         'warn',
         'maintenance',
         'Saved maintenance config to disk (Firestore sync skipped)',
-        err instanceof Error ? err.message : 'Firestore write error',
+        mirrorRes.reason instanceof Error ? mirrorRes.reason.message : 'Firestore write error',
       );
     }
   }
@@ -1195,6 +1399,7 @@ async function probeBotHeartbeat(forceFresh = false): Promise<typeof botHeartbea
       fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
         signal: AbortSignal.timeout(6000),
       }).catch(() => null),
+      refreshBotMenuWebAppUrl(botToken),
     ]);
     const latencyMs = Math.max(1, Date.now() - startedAt);
     const meData = (await meRes.json()) as {
@@ -1935,7 +2140,11 @@ async function applyReferralInServerDb(params: {
         TELEGRAM_BOT_USERNAME_ENV ||
         cachedBotUsername ||
         DEFAULT_TELEGRAM_BOT_USERNAME;
-      const friendsUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}?startapp=friends`;
+      const friendsButton = buildDirectPrivateMiniAppButton(
+        '👥 View Friends & Rewards',
+        botUsername,
+        'friends',
+      );
       try {
         let tgRes = await fetch(
           `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
@@ -1947,7 +2156,7 @@ async function applyReferralInServerDb(params: {
               text: messageText,
               parse_mode: 'HTML',
               reply_markup: {
-                inline_keyboard: [[{ text: '👥 View Friends & Rewards', url: friendsUrl }]],
+                inline_keyboard: [[friendsButton]],
               },
             }),
             signal: AbortSignal.timeout(7000),
@@ -2570,17 +2779,28 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
     const hasStartRef = Boolean(isStart && startPayload.length >= 3 && numericChatId);
     const botToken = getTelegramBotToken();
     const botUsername = getFastBotUsername();
-    const miniAppUrl = startPayload
-      ? `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}?startapp=${encodeURIComponent(startPayload)}`
-      : `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
-    const friendsUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}?startapp=friends`;
+    if (isStart && botToken && !cachedBotMenuWebAppUrl) {
+      await refreshBotMenuWebAppUrl(botToken);
+    }
     const greetName = escapeHtml(
       String(msg.from.first_name || msg.from.username || 'Farmer').trim().slice(0, 50) || 'Farmer',
     );
     const replyMarkup = {
       inline_keyboard: [
-        [{ text: '🐔 Open Alpha Gram Farm', url: miniAppUrl }],
-        [{ text: `👥 Invite & Earn +${BONUS_PER_REFERRAL} Coins`, url: friendsUrl }],
+        [
+          buildDirectPrivateMiniAppButton(
+            '🐔 Open Alpha Gram Farm',
+            botUsername,
+            startPayload || undefined,
+          ),
+        ],
+        [
+          buildDirectPrivateMiniAppButton(
+            `👥 Invite & Earn +${BONUS_PER_REFERRAL} Coins`,
+            botUsername,
+            'friends',
+          ),
+        ],
       ],
     };
 
@@ -3207,11 +3427,14 @@ async function startServer() {
       .slice(0, mediaType === 'none' ? 4096 : 1024);
 
     const botUsername = await resolveTelegramBotUsername();
-    const defaultMiniAppUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
     const replyMarkup =
       buttonText && buttonUrl
         ? { inline_keyboard: [[{ text: buttonText, url: buttonUrl }]] }
-        : { inline_keyboard: [[{ text: '🐔 Open Alpha Gram', url: defaultMiniAppUrl }]] };
+        : {
+            inline_keyboard: [
+              [buildDirectPrivateMiniAppButton('🐔 Open Alpha Gram', botUsername)],
+            ],
+          };
 
     const adminNumericId = extractTelegramNumericUserId(resolvedPlayerId);
     const targetChatIds = body.testOnlyToAdmin
@@ -5625,7 +5848,11 @@ async function startServer() {
     });
 
     const botUsername = getFastBotUsername();
-    const friendsUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}?startapp=friends`;
+    const friendsButton = buildDirectPrivateMiniAppButton(
+      '👥 View Friends & Rewards',
+      botUsername,
+      'friends',
+    );
 
     try {
       let tgRes = await fetch(
@@ -5638,7 +5865,7 @@ async function startServer() {
             text: messageText,
             parse_mode: 'HTML',
             reply_markup: {
-              inline_keyboard: [[{ text: '👥 View Friends & Rewards', url: friendsUrl }]],
+              inline_keyboard: [[friendsButton]],
             },
           }),
           signal: AbortSignal.timeout(7000),
@@ -6044,7 +6271,7 @@ async function startServer() {
 
     const activeTemplate = status === 'approved' ? await loadWithdrawApproveTemplate() : null;
     const botUsername = await resolveTelegramBotUsername();
-    const miniAppUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
+    const miniAppUrl = buildTelegramMiniAppLink(botUsername);
 
     let channelPayload: Record<string, unknown>;
     let channelPlainFallback = '';
@@ -6299,6 +6526,8 @@ async function startServer() {
     }
 
     const nowMs = Date.now();
+    const deadlineMs = nowMs + 15_000;
+    const isTimedOut = () => Date.now() >= deadlineMs;
     const resetTokens = encodeAchievementsWithAds([], 0, { resetEpochMs: nowMs });
     let playersResetCount = 0;
     let referralsDeletedCount = 0;
@@ -6306,6 +6535,25 @@ async function startServer() {
     let promosDeletedCount = 0;
     let bansDeletedCount = 0;
     let withdrawalsRejectedCount = 0;
+
+    const withResetStepTimeout = <T>(
+      promise: Promise<T>,
+      ms: number,
+      label: string,
+    ): Promise<T> => {
+      let timerId: ReturnType<typeof setTimeout> | null = null;
+      return Promise.race([
+        promise.finally(() => {
+          if (timerId) clearTimeout(timerId);
+        }),
+        new Promise<never>((_, reject) => {
+          timerId = setTimeout(
+            () => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)),
+            ms,
+          );
+        }),
+      ]);
+    };
 
     try {
       if (serverDb) {
@@ -6315,6 +6563,7 @@ async function startServer() {
           worker: (item: T) => Promise<void>,
         ): Promise<void> => {
           for (let i = 0; i < items.length; i += concurrency) {
+            if (isTimedOut()) break;
             await Promise.allSettled(items.slice(i, i + concurrency).map((item) => worker(item)));
           }
         };
@@ -6323,6 +6572,7 @@ async function startServer() {
           let removed = 0;
           let lastCursor: QueryDocumentSnapshot<DocumentData> | null = null;
           for (let page = 0; page < 50; page++) {
+            if (isTimedOut()) break;
             const colQ: Query<DocumentData> = lastCursor
               ? query(
                   collection(serverDb!, colName),
@@ -6331,7 +6581,11 @@ async function startServer() {
                   limit(pageSize),
                 )
               : query(collection(serverDb!, colName), orderBy('__name__'), limit(pageSize));
-            const snap: QuerySnapshot<DocumentData> = await getDocs(colQ);
+            const snap: QuerySnapshot<DocumentData> = await withResetStepTimeout(
+              getDocs(colQ),
+              6_000,
+              `Reading ${colName}`,
+            );
             if (snap.empty) break;
             await runConcurrent(snap.docs, 20, async (d) => {
               try {
@@ -6359,6 +6613,7 @@ async function startServer() {
         // Reject any pending withdraw_requests (rules forbid deletion on withdraw_requests)
         let lastWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
         for (let page = 0; page < 50; page++) {
+          if (isTimedOut()) break;
           const wdQ: Query<DocumentData> = lastWdCursor
             ? query(
                 collection(serverDb, 'withdraw_requests'),
@@ -6367,7 +6622,11 @@ async function startServer() {
                 limit(100),
               )
             : query(collection(serverDb, 'withdraw_requests'), orderBy('__name__'), limit(100));
-          const wdSnap: QuerySnapshot<DocumentData> = await getDocs(wdQ);
+          const wdSnap: QuerySnapshot<DocumentData> = await withResetStepTimeout(
+            getDocs(wdQ),
+            6_000,
+            'Reading withdraw_requests',
+          );
           if (wdSnap.empty) break;
           const pendingDocs = wdSnap.docs.filter(
             (d) => String(d.data()?.status || '') === 'pending',
@@ -6392,6 +6651,7 @@ async function startServer() {
         // Reset every player document & clean subcollections concurrently (preserve __admin_vault__)
         let lastPlayerCursor: QueryDocumentSnapshot<DocumentData> | null = null;
         for (let page = 0; page < 100; page++) {
+          if (isTimedOut()) break;
           const pQ: Query<DocumentData> = lastPlayerCursor
             ? query(
                 collection(serverDb, 'players'),
@@ -6400,14 +6660,21 @@ async function startServer() {
                 limit(50),
               )
             : query(collection(serverDb, 'players'), orderBy('__name__'), limit(50));
-          const pSnap: QuerySnapshot<DocumentData> = await getDocs(pQ);
+          const pSnap: QuerySnapshot<DocumentData> = await withResetStepTimeout(
+            getDocs(pQ),
+            6_000,
+            'Reading players',
+          );
           if (pSnap.empty) break;
 
-          const playerDocs = pSnap.docs.filter((d) => d.id !== ADMIN_PASSCODE_VAULT_UID);
+          const playerDocs = pSnap.docs.filter(
+            (d) => d.id !== ADMIN_PASSCODE_VAULT_UID && !d.id.startsWith('__'),
+          );
           await runConcurrent(playerDocs, 10, async (d) => {
             const cleanReferrals = async () => {
               let lastRefCursor: QueryDocumentSnapshot<DocumentData> | null = null;
               for (let rPage = 0; rPage < 40; rPage++) {
+                if (isTimedOut()) break;
                 const rQ: Query<DocumentData> = lastRefCursor
                   ? query(
                       collection(serverDb!, 'players', d.id, 'referrals'),
@@ -6438,6 +6705,7 @@ async function startServer() {
             const rejectPendingWithdrawals = async () => {
               let lastUserWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
               for (let wPage = 0; wPage < 20; wPage++) {
+                if (isTimedOut()) break;
                 const uWdQ: Query<DocumentData> = lastUserWdCursor
                   ? query(
                       collection(serverDb!, 'players', d.id, 'withdrawals'),
@@ -6475,6 +6743,7 @@ async function startServer() {
             const rejectPendingTransactions = async () => {
               let lastUserTxCursor: QueryDocumentSnapshot<DocumentData> | null = null;
               for (let tPage = 0; tPage < 20; tPage++) {
+                if (isTimedOut()) break;
                 const uTxQ: Query<DocumentData> = lastUserTxCursor
                   ? query(
                       collection(serverDb!, 'players', d.id, 'transactions'),
@@ -6570,6 +6839,7 @@ async function startServer() {
         // Reset leaderboard stats
         let lastLbCursor: QueryDocumentSnapshot<DocumentData> | null = null;
         for (let page = 0; page < 100; page++) {
+          if (isTimedOut()) break;
           const lbQ: Query<DocumentData> = lastLbCursor
             ? query(
                 collection(serverDb, 'leaderboard'),
@@ -6578,9 +6848,15 @@ async function startServer() {
                 limit(50),
               )
             : query(collection(serverDb, 'leaderboard'), orderBy('__name__'), limit(50));
-          const lbSnap: QuerySnapshot<DocumentData> = await getDocs(lbQ);
+          const lbSnap: QuerySnapshot<DocumentData> = await withResetStepTimeout(
+            getDocs(lbQ),
+            5_000,
+            'Reading leaderboard',
+          );
           if (lbSnap.empty) break;
-          const lbDocs = lbSnap.docs.filter((d) => d.id !== ADMIN_PASSCODE_VAULT_UID);
+          const lbDocs = lbSnap.docs.filter(
+            (d) => d.id !== ADMIN_PASSCODE_VAULT_UID && !d.id.startsWith('__'),
+          );
           await runConcurrent(lbDocs, 20, async (d) => {
             try {
               await updateDoc(d.ref, {
@@ -6599,34 +6875,61 @@ async function startServer() {
           if (lbSnap.size < 50) break;
         }
 
-        // Reset season back to Season 1 & bump app_config/system_reset epoch
+        // Reset season back to Season 1 & bump app_config/system_reset + mirror doc epoch
         let prevCount = 0;
         try {
-          const resetSnap = await getFreshDoc(doc(serverDb, 'app_config', 'system_reset'));
-          if (resetSnap.exists()) {
-            prevCount = Math.max(0, Math.floor(Number(resetSnap.data()?.resetCount ?? 0) || 0));
-          }
+          const [resetSnap, mirrorSnap] = await withResetStepTimeout(
+            Promise.all([
+              getFreshDoc(doc(serverDb, 'app_config', 'system_reset')).catch(() => null),
+              getFreshDoc(doc(serverDb, 'players', SYSTEM_RESET_PROFILE_DOC_ID)).catch(() => null),
+            ]),
+            4_000,
+            'Reading reset epoch',
+          );
+          const appCount = resetSnap?.exists()
+            ? Math.max(0, Math.floor(Number(resetSnap.data()?.resetCount ?? 0) || 0))
+            : 0;
+          const mirrorCount = mirrorSnap?.exists()
+            ? Math.max(0, Math.floor(Number(mirrorSnap.data()?.xp ?? 0) || 0))
+            : 0;
+          prevCount = Math.max(appCount, mirrorCount);
         } catch {
           prevCount = 0;
         }
-        await Promise.all([
-          setDoc(doc(serverDb, 'app_config', 'season'), {
-            seasonNumber: 1,
-            title: 'Harvest Cup Season 1',
-            prizePoolCoins: 25000,
-            endsAtMs: nowMs + 4 * 86_400_000,
-            lastWinners: [],
-            updatedAtMs: nowMs,
-            updatedAt: serverTimestamp(),
-          }),
-          setDoc(doc(serverDb, 'app_config', 'system_reset'), {
-            resetEpochMs: nowMs,
-            resetCount: prevCount + 1,
-            resetBy: String(resolvedPlayerId || 'admin').slice(0, 64),
-            updatedAtMs: nowMs,
-            updatedAt: serverTimestamp(),
-          }),
-        ]);
+        const nextResetCount = prevCount + 1;
+        await withResetStepTimeout(
+          Promise.allSettled([
+            setDoc(doc(serverDb, 'app_config', 'season'), {
+              seasonNumber: 1,
+              title: 'Harvest Cup Season 1',
+              prizePoolCoins: 25000,
+              endsAtMs: nowMs + 4 * 86_400_000,
+              lastWinners: [],
+              updatedAtMs: nowMs,
+              updatedAt: serverTimestamp(),
+            }),
+            setDoc(doc(serverDb, 'app_config', 'system_reset'), {
+              resetEpochMs: nowMs,
+              resetCount: nextResetCount,
+              resetBy: String(resolvedPlayerId || 'admin').slice(0, 64),
+              updatedAtMs: nowMs,
+              updatedAt: serverTimestamp(),
+            }),
+            upsertServerReservedPlayerDoc({
+              docId: SYSTEM_RESET_PROFILE_DOC_ID,
+              referralCode: '__RESET__',
+              displayName: 'System Reset Epoch',
+              handle: '@sys_reset',
+              xp: nextResetCount,
+              referredBy: String(resolvedPlayerId || 'admin').slice(0, 64),
+              referralActivated: false,
+              lastCollectedAt: nowMs,
+              claimedAchievementIds: ['__sys_reset_v1__', String(nowMs)],
+            }),
+          ]),
+          6_000,
+          'Saving global system reset epoch',
+        );
       }
 
       // Clear server in-memory runtime caches (preserve bot config & session secret)

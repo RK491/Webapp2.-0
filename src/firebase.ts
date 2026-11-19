@@ -7,7 +7,7 @@ import {
   initializeFirestore,
   memoryLocalCache,
   persistentLocalCache,
-  persistentSingleTabManager,
+  persistentMultipleTabManager,
   type Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
@@ -18,8 +18,7 @@ function createFirestoreInstance(): Firestore {
   const isBrowser = typeof window !== 'undefined';
   const transportSettings = isBrowser
     ? {
-        experimentalForceLongPolling: true,
-        experimentalLongPollingOptions: { timeoutSeconds: 15 },
+        experimentalAutoDetectLongPolling: true,
       }
     : {};
 
@@ -28,7 +27,7 @@ function createFirestoreInstance(): Firestore {
       app,
       {
         localCache: persistentLocalCache({
-          tabManager: persistentSingleTabManager({ forceOwnership: true }),
+          tabManager: persistentMultipleTabManager(),
         }),
         ...transportSettings,
       },
@@ -82,10 +81,12 @@ export function handleFirestoreError(
 }
 
 export async function testFirestoreConnection(): Promise<boolean> {
-  const probeRef = doc(db, 'leaderboard', 'healthcheck');
+  const probeRef = doc(db, 'app_config', 'season');
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      await enableNetwork(db).catch(() => {});
+      if (attempt > 0) {
+        await enableNetwork(db).catch(() => {});
+      }
       await getDocFromServer(probeRef);
       return true;
     } catch (error) {
@@ -97,7 +98,7 @@ export async function testFirestoreConnection(): Promise<boolean> {
         return true;
       }
       if (attempt === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await new Promise((resolve) => setTimeout(resolve, 1200));
         continue;
       }
       console.error('Please check your Firebase configuration.');

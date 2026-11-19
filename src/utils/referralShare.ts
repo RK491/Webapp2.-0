@@ -42,10 +42,13 @@ export function buildPersonalReferralUrl(
   const botUsername =
     normalizeTelegramBotUsername(options?.botUsername) || DEFAULT_TELEGRAM_BOT_USERNAME;
   const appShortName =
-    normalizeTelegramMiniAppShortName(options?.appShortName) ||
-    DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME;
+    options?.appShortName !== undefined
+      ? normalizeTelegramMiniAppShortName(options.appShortName)
+      : DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME;
 
-  const baseUrl = `https://t.me/${botUsername}/${appShortName}`;
+  const baseUrl = appShortName
+    ? `https://t.me/${botUsername}/${appShortName}`
+    : `https://t.me/${botUsername}`;
   const cleanParam = String(referralIdOrCode || '').trim();
   if (!cleanParam) {
     return baseUrl;

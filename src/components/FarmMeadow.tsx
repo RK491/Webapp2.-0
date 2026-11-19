@@ -11,8 +11,10 @@ import {
   COOP_FEVER_MULTIPLIER,
   COOP_FEVER_REQUIRED_ADS,
   FEED_BOOSTER_COST_COINS,
+  formatGoldenEggCooldownWait,
   getChickenMilestoneReached,
   getCoopFeverProgress,
+  getGoldenEggCooldownRemainingMs,
   getWithdrawAdGateStatus,
   GOLDEN_EGG_REWARD_COINS,
   isAutoHarvestDroneActive,
@@ -115,8 +117,12 @@ function setStoredMilestone(uid: string, milestone: number): void {
 
 function formatCountdownMs(ms: number): string {
   const totalSec = Math.max(0, Math.floor(ms / 1000));
-  const m = Math.floor(totalSec / 60);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
@@ -219,7 +225,8 @@ export function FarmMeadow({
   const feverProgress = getCoopFeverProgress(profile, liveNowMs);
   const droneActive = isAutoHarvestDroneActive(profile, liveNowMs);
   const droneRemainingMs = Math.max(0, Number(profile.autoHarvestUntilMs ?? 0) - liveNowMs);
-  const goldenReady = isGoldenEggReady(profile, liveNowMs);
+  const goldenRemainingMs = getGoldenEggCooldownRemainingMs(profile, liveNowMs);
+  const goldenReady = isProfileSynced && isGoldenEggReady(profile, liveNowMs);
   const productionRate = calculateProductionRate(profile, liveNowMs);
   const totalChickens = calculateTotalChickens(profile);
   const adGate = getWithdrawAdGateStatus(profile);
@@ -681,8 +688,8 @@ export function FarmMeadow({
               </AnimatePresence>
 
               <div className="flex items-center gap-1.5 ml-auto">
-                <AnimatePresence>
-                  {totalChickens > 0 && goldenReady && onGoldenEggDrop && (
+                <AnimatePresence mode="popLayout" initial={false}>
+                  {totalChickens > 0 && onGoldenEggDrop && goldenReady ? (
                     <motion.div
                       key={`gold-badge-${entranceEpoch}`}
                       initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.86, y: -6 }}
@@ -695,7 +702,24 @@ export function FarmMeadow({
                       <span className="hidden sm:inline">Tap Hen Gold!</span>
                       <span className="sm:hidden">Gold!</span>
                     </motion.div>
-                  )}
+                  ) : totalChickens > 0 && onGoldenEggDrop && goldenRemainingMs > 0 ? (
+                    <motion.button
+                      key={`gold-cooldown-${entranceEpoch}`}
+                      type="button"
+                      onClick={onGoldenEggDrop}
+                      aria-label={`Golden Egg recharging, ${formatGoldenEggCooldownWait(goldenRemainingMs)}`}
+                      initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.9, y: -6 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.9 }}
+                      whileHover={!prefersReducedMotion ? { y: -1, scale: 1.02 } : undefined}
+                      whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
+                      transition={cardTransition}
+                      className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/70 hover:bg-stone-900/80 backdrop-blur-md border border-amber-400/30 px-2.5 py-2 text-[11px] font-extrabold text-amber-200 inline-flex items-center gap-1 shadow-lg"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400/80 shrink-0" />
+                      <span className="font-mono-num tabular-nums">{formatCountdownMs(goldenRemainingMs)}</span>
+                    </motion.button>
+                  ) : null}
                 </AnimatePresence>
                 {onOpenWithdraw && (
                   <motion.button

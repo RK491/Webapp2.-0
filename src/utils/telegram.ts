@@ -24,6 +24,7 @@ interface TelegramWindow {
       openTelegramLink?: (url: string) => void;
       onEvent?: (eventType: string, callback: () => void) => void;
       offEvent?: (eventType: string, callback: () => void) => void;
+      platform?: string;
       initData?: string;
       initDataUnsafe?: {
         user?: TelegramWebAppUser;
@@ -38,11 +39,55 @@ interface TelegramWindow {
   };
 }
 
+export function normalizeStartParam(raw?: string | null): string {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  try {
+    return decodeURIComponent(trimmed).trim();
+  } catch {
+    return trimmed;
+  }
+}
+
+export type StartAppActionTab = 'friends' | 'tasks' | 'packs' | 'wallet' | 'farm';
+
+export function parseStartAppAction(raw?: string | null): {
+  actionTab: StartAppActionTab | null;
+  referralCode: string | null;
+} {
+  const clean = normalizeStartParam(raw);
+  if (!clean) {
+    return { actionTab: null, referralCode: null };
+  }
+  const lower = clean.toLowerCase();
+  if (lower === 'friends' || lower === 'invite') {
+    return { actionTab: 'friends', referralCode: null };
+  }
+  if (lower === 'tasks' || lower === 'earn') {
+    return { actionTab: 'tasks', referralCode: null };
+  }
+  if (lower === 'packs' || lower === 'shop' || lower === 'market') {
+    return { actionTab: 'packs', referralCode: null };
+  }
+  if (lower === 'wallet' || lower === 'deposit' || lower === 'withdraw') {
+    return { actionTab: 'wallet', referralCode: null };
+  }
+  if (lower === 'farm' || lower === 'home') {
+    return { actionTab: 'farm', referralCode: null };
+  }
+
+  const stripped = clean.replace(/^(?:ref|r)_/i, '').trim();
+  if (stripped.length >= 3 && /^[a-zA-Z0-9_-]{3,64}$/.test(stripped)) {
+    return { actionTab: null, referralCode: stripped };
+  }
+  return { actionTab: null, referralCode: null };
+}
+
 export const DEFAULT_TELEGRAM_BOT_USERNAME = 'AlphaGramAiBot';
-export const DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME = 'app';
+export const DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME = '';
 
 const BOT_USERNAME_CACHE_KEY = 'chickenland_tg_bot_username_v1';
-const APP_SHORT_NAME_CACHE_KEY = 'chickenland_tg_app_short_name_v1';
+const APP_SHORT_NAME_CACHE_KEY = 'chickenland_tg_app_short_name_v2';
 
 export interface TelegramBotConfig {
   botUsername: string;
@@ -174,10 +219,9 @@ export function detectTelegramBotConfig(params?: {
   const appShortName =
     urlApp ||
     refParsed.appShortName ||
-    serverApp ||
-    envApp ||
-    cachedApp ||
-    DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME;
+    (params?.serverAppShortName !== undefined
+      ? serverApp
+      : envApp || cachedApp || DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME);
 
   return {
     botUsername,
@@ -247,7 +291,7 @@ function parseInitDataUserParams(rawInitData: string): {
   try {
     const params = new URLSearchParams(rawInitData);
     const userJson = params.get('user');
-    const startParam = (params.get('start_param') || '').trim();
+    const startParam = normalizeStartParam(params.get('start_param') || '');
     if (userJson) {
       const parsed = JSON.parse(userJson) as TelegramWebAppUser;
       if (parsed && parsed.id !== undefined && parsed.id !== null) {
@@ -260,6 +304,87 @@ function parseInitDataUserParams(rawInitData: string): {
   }
 }
 
+export function extractStartParamFromLocation(params?: {
+  initDataUnsafeStartParam?: string;
+  initData?: string;
+  search?: string;
+  hash?: string;
+}): string {
+  const direct = normalizeStartParam(params?.initDataUnsafeStartParam);
+  if (direct) return direct;
+
+  if (params?.initData) {
+    const parsed = parseInitDataUserParams(params.initData);
+    if (parsed.startParam) return parsed.startParam;
+  }
+
+  if (params?.search) {
+    const query = new URLSearchParams(params.search);
+    const fromSearch = normalizeStartParam(
+      query.get('tgWebAppStartParam') ||
+        query.get('startapp') ||
+        query.get('start_param') ||
+        query.get('start') ||
+        query.get('ref'),
+    );
+    if (fromSearch) return fromSearch;
+  }
+
+  if (params?.hash) {
+    const cleanHash = params.hash.startsWith('#') ? params.hash.slice(1) : params.hash;
+    const hashParams = new URLSearchParams(cleanHash);
+    const rawTgWebAppData = hashParams.get('tgWebAppData') || '';
+    if (rawTgWebAppData) {
+      const parsed = parseInitDataUserParams(rawTgWebAppData);
+      if (parsed.startParam) return parsed.startParam;
+    }
+    const fromHash = normalizeStartParam(
+      hashParams.get('tgWebAppStartParam') ||
+        hashParams.get('startapp') ||
+        hashParams.get('start_param') ||
+        hashParams.get('start') ||
+        hashParams.get('ref'),
+    );
+    if (fromHash) return fromHash;
+  }
+
+  return '';
+}
+
+export function getBrowserStartParam(): string {
+  if (typeof window === 'undefined') return '';
+  const win = window as unknown as TelegramWindow;
+  const webApp = win.Telegram?.WebApp;
+  return extractStartParamFromLocation({
+    initDataUnsafeStartParam: webApp?.initDataUnsafe?.start_param,
+    initData: getTelegramInitData(),
+    search: window.location.search,
+    hash: window.location.hash,
+  });
+}
+
+export function ensureTelegramWebAppReady(): boolean {
+  if (typeof window === 'undefined') return false;
+  const win = window as unknown as TelegramWindow;
+  const webApp = win.Telegram?.WebApp;
+  if (!webApp) return false;
+  try {
+    webApp.ready?.();
+    webApp.expand?.();
+  } catch {
+    // Ignore outside Telegram
+  }
+  const platform = String(webApp.platform || '').trim().toLowerCase();
+  const hasTgContext = Boolean(
+    (webApp.initData && webApp.initData.trim()) ||
+      webApp.initDataUnsafe?.user?.id ||
+      (platform && platform !== 'unknown') ||
+      window.location.hash.includes('tgWebAppData=') ||
+      window.location.hash.includes('tgWebAppStartParam='),
+  );
+  return hasTgContext;
+}
+
 export function resolveTelegramUserIdentity(params: {
   tgUser?: TelegramWebAppUser | null;
   initData?: string;
@@ -268,7 +393,7 @@ export function resolveTelegramUserIdentity(params: {
   hash?: string;
 }): DetectedUserIdentity {
   let user = params.tgUser ?? null;
-  let derivedStartParam = (params.startParam || '').trim();
+  let derivedStartParam = normalizeStartParam(params.startParam);
 
   if (params.initData) {
     const parsed = parseInitDataUserParams(params.initData);
@@ -286,26 +411,26 @@ export function resolveTelegramUserIdentity(params: {
       if (!derivedStartParam && parsed.startParam) derivedStartParam = parsed.startParam;
     }
     if (!derivedStartParam) {
-      derivedStartParam = (
+      derivedStartParam = normalizeStartParam(
         hashParams.get('tgWebAppStartParam') ||
-        hashParams.get('startapp') ||
-        hashParams.get('start_param') ||
-        hashParams.get('ref') ||
-        ''
-      ).trim();
+          hashParams.get('startapp') ||
+          hashParams.get('start_param') ||
+          hashParams.get('start') ||
+          hashParams.get('ref'),
+      );
     }
   }
 
   if (params.search) {
     const query = new URLSearchParams(params.search);
     if (!derivedStartParam) {
-      derivedStartParam = (
+      derivedStartParam = normalizeStartParam(
         query.get('tgWebAppStartParam') ||
-        query.get('startapp') ||
-        query.get('start_param') ||
-        query.get('ref') ||
-        ''
-      ).trim();
+          query.get('startapp') ||
+          query.get('start_param') ||
+          query.get('start') ||
+          query.get('ref'),
+      );
     }
   }
 
@@ -379,16 +504,11 @@ export function detectBrowserTelegramIdentity(): DetectedUserIdentity {
   }
   const win = window as unknown as TelegramWindow;
   const webApp = win.Telegram?.WebApp;
-  try {
-    webApp?.ready?.();
-    webApp?.expand?.();
-  } catch {
-    // Ignore outside Telegram
-  }
+  ensureTelegramWebAppReady();
 
   return resolveTelegramUserIdentity({
     tgUser: webApp?.initDataUnsafe?.user ?? null,
-    initData: webApp?.initData ?? '',
+    initData: getTelegramInitData(),
     startParam: webApp?.initDataUnsafe?.start_param ?? '',
     search: window.location.search,
     hash: window.location.hash,

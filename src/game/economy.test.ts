@@ -84,6 +84,7 @@ import {
   filterWithdrawalsByTab,
   formatAdConfigTemplate,
   formatChannelsHandleSummary,
+  formatGoldenEggCooldownWait,
   formatPromoRewardSummary,
   formatReferralHandle,
   formatShortTonWallet,
@@ -97,6 +98,7 @@ import {
   getChickenMilestoneReached,
   getCoopFeverAdsWatched,
   getEffectiveAdminIds,
+  getGoldenEggCooldownRemainingMs,
   getTaskRemainingSlots,
   getTotalAdsWatched,
   getWithdrawAdsWatched,
@@ -175,9 +177,12 @@ import {
   DEFAULT_TELEGRAM_BOT_USERNAME,
   DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME,
   detectTelegramBotConfig,
+  extractStartParamFromLocation,
   getTelegramChannelUrl,
   maskTelegramBotToken,
+  normalizeStartParam,
   normalizeTelegramBotUsername,
+  parseStartAppAction,
   resolveTelegramUserIdentity,
   sanitizeTelegramBotTokenInput,
   verifyTelegramBotTokenDirect,
@@ -1324,10 +1329,11 @@ test('referralShare builds Telegram Mini App t.me startapp URL with auto-detecte
     appShortName: 'app',
   });
   assert.equal(url, 'https://t.me/AlphaGramAiBot/app?startapp=7508911853');
-  assert.equal(
-    buildPersonalReferralUrl('player_abc123'),
-    `https://t.me/${DEFAULT_TELEGRAM_BOT_USERNAME}/${DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME}?startapp=player_abc123`,
-  );
+  const expectedDefaultUrl = DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME
+    ? `https://t.me/${DEFAULT_TELEGRAM_BOT_USERNAME}/${DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME}?startapp=player_abc123`
+    : `https://t.me/${DEFAULT_TELEGRAM_BOT_USERNAME}?startapp=player_abc123`;
+  assert.equal(buildPersonalReferralUrl('player_abc123'), expectedDefaultUrl);
+  assert.equal(buildPersonalReferralUrl('player_abc123'), 'https://t.me/AlphaGramAiBot?startapp=player_abc123');
   assert.equal(
     buildPersonalReferralUrl('', { botUsername: '@CustomFarmBot', appShortName: 'game' }),
     'https://t.me/CustomFarmBot/game',
@@ -1606,9 +1612,12 @@ test('golden egg drops require at least 1 chicken, reward bonus coins + XP, and 
   assert.equal(drop.profile.coins, activeFarm.coins + GOLDEN_EGG_REWARD_COINS);
   assert.equal(drop.profile.goldenEggsFound, 1);
 
+  assert.equal(GOLDEN_EGG_COOLDOWN_MS, 5 * 60 * 60 * 1000);
   assert.equal(isGoldenEggReady(drop.profile, NOW + 10_000), false);
+  assert.equal(isGoldenEggReady(drop.profile, NOW + 4 * 60 * 60 * 1000), false);
   const tooEarly = claimGoldenEggDrop(drop.profile, NOW + 10_000);
   assert.ok('error' in tooEarly);
+  assert.match(tooEarly.error, /4h 59m left/);
 
   const afterCooldown = claimGoldenEggDrop(drop.profile, NOW + GOLDEN_EGG_COOLDOWN_MS);
   assert.ok(!('error' in afterCooldown));
@@ -2597,7 +2606,7 @@ test('detectTelegramBotConfig auto-detects bot username & mini app short name ac
 
   const fromDefault = detectTelegramBotConfig({});
   assert.equal(fromDefault.botUsername, 'AlphaGramAiBot');
-  assert.equal(fromDefault.appShortName, 'app');
+  assert.equal(fromDefault.appShortName, '');
   assert.equal(fromDefault.source, 'default');
 
   const startAppFromSearch = resolveTelegramUserIdentity({
@@ -3410,6 +3419,102 @@ test('resolveMaintenanceConfig normalizes fields, enforces bounds, and preserves
   assert.equal(custom.updatedBy, 'tg_7508911853');
   assert.equal(custom.updatedAtMs, 1795000000000);
 });
+
+test('parseStartAppAction and extractStartParamFromLocation preserve referral codes and separate nav actions', () => {
+  assert.equal(normalizeStartParam('  ref_7508911853  '), 'ref_7508911853');
+  assert.equal(normalizeStartParam('ref%5F7508911853'), 'ref_7508911853');
+
+  assert.deepEqual(parseStartAppAction('friends'), { actionTab: 'friends', referralCode: null });
+  assert.deepEqual(parseStartAppAction('invite'), { actionTab: 'friends', referralCode: null });
+  assert.deepEqual(parseStartAppAction('ref_7508911853'), {
+    actionTab: null,
+    referralCode: '7508911853',
+  });
+  assert.deepEqual(parseStartAppAction('r_AG998877'), {
+    actionTab: null,
+    referralCode: 'AG998877',
+  });
+  assert.deepEqual(parseStartAppAction('7508911853'), {
+    actionTab: null,
+    referralCode: '7508911853',
+  });
+
+  assert.equal(
+    extractStartParamFromLocation({
+      search: '?startapp=ref_7508911853',
+    }),
+    'ref_7508911853',
+  );
+  assert.equal(
+    extractStartParamFromLocation({
+      search: '?start=7508911853',
+    }),
+    '7508911853',
+  );
+  assert.equal(
+    extractStartParamFromLocation({
+      hash: '#tgWebAppStartParam=7508911853',
+    }),
+    '7508911853',
+  );
+  assert.equal(
+    extractStartParamFromLocation({
+      hash: `#tgWebAppData=${encodeURIComponent('start_param=987654321&user=%7B%22id%22%3A123%7D')}`,
+    }),
+    '987654321',
+  );
+});
+
+test('Golden Egg 5-hour cooldown blocks repeat claims, handles clock skew, and unlocks exactly after 5h', () => {
+  assert.equal(GOLDEN_EGG_COOLDOWN_MS, 5 * 60 * 60 * 1000);
+
+  const { profile: emptyProfile } = createDefaultProfile('tg_gold_tester', 'Gold Tester', '@goldtester', NOW);
+  assert.equal(getGoldenEggCooldownRemainingMs(emptyProfile, NOW), 0);
+  assert.equal(isGoldenEggReady(emptyProfile, NOW), true);
+  const noChickenClaim = claimGoldenEggDrop(emptyProfile, NOW);
+  assert.ok('error' in noChickenClaim);
+
+  const profile = { ...emptyProfile, leghornCount: 1 };
+
+  // First claim succeeds and stamps lastGoldenEggAtMs
+  const firstClaim = claimGoldenEggDrop(profile, NOW);
+  assert.ok(!('error' in firstClaim));
+  assert.equal(firstClaim.profile.lastGoldenEggAtMs, NOW);
+  assert.equal(firstClaim.profile.goldenEggsFound, 1);
+
+  // Immediately after claim (and 1 hour later, 4h59m59s later) it stays locked
+  assert.equal(getGoldenEggCooldownRemainingMs(firstClaim.profile, NOW), GOLDEN_EGG_COOLDOWN_MS);
+  assert.equal(isGoldenEggReady(firstClaim.profile, NOW + 60 * 60 * 1000), false);
+  const blocked = claimGoldenEggDrop(firstClaim.profile, NOW + 60 * 60 * 1000);
+  assert.ok('error' in blocked);
+  assert.equal(blocked.remainingMs, 4 * 60 * 60 * 1000);
+  assert.match(blocked.error, /4h 0m left/);
+
+  const almostReady = claimGoldenEggDrop(firstClaim.profile, NOW + GOLDEN_EGG_COOLDOWN_MS - 1000);
+  assert.ok('error' in almostReady);
+  assert.equal(almostReady.remainingMs, 1000);
+
+  // Backward device clock skew must never bypass cooldown
+  assert.equal(
+    getGoldenEggCooldownRemainingMs(firstClaim.profile, NOW - 30_000),
+    GOLDEN_EGG_COOLDOWN_MS,
+  );
+  assert.equal(isGoldenEggReady(firstClaim.profile, NOW - 30_000), false);
+
+  // Formatting helper renders clear human countdown strings
+  assert.equal(formatGoldenEggCooldownWait(4 * 3600_000 + 59 * 60_000), '4h 59m left');
+  assert.equal(formatGoldenEggCooldownWait(12 * 60_000 + 30_000), '12m 30s left');
+  assert.equal(formatGoldenEggCooldownWait(9000), '9s left');
+
+  // Unlocks at exact 5-hour mark
+  assert.equal(getGoldenEggCooldownRemainingMs(firstClaim.profile, NOW + GOLDEN_EGG_COOLDOWN_MS), 0);
+  assert.equal(isGoldenEggReady(firstClaim.profile, NOW + GOLDEN_EGG_COOLDOWN_MS), true);
+  const secondClaim = claimGoldenEggDrop(firstClaim.profile, NOW + GOLDEN_EGG_COOLDOWN_MS);
+  assert.ok(!('error' in secondClaim));
+  assert.equal(secondClaim.profile.lastGoldenEggAtMs, NOW + GOLDEN_EGG_COOLDOWN_MS);
+  assert.equal(secondClaim.profile.goldenEggsFound, 2);
+});
+
 
 
 

@@ -296,7 +296,9 @@ interface AdminPanelViewProps {
     config: Omit<TaskPricingConfig, 'updatedAtMs'>,
   ) => Promise<boolean | void>;
   systemResetConfig?: SystemResetConfig;
-  onExecuteDataReset?: () => Promise<{ ok: boolean; error?: string; summary?: string }>;
+  onExecuteDataReset?: (
+    onProgress?: (stage: string) => void,
+  ) => Promise<{ ok: boolean; error?: string; summary?: string }>;
   maintenanceConfig?: MaintenanceConfig;
   onSaveMaintenanceConfig?: (
     config: Omit<MaintenanceConfig, 'updatedAtMs'>,
@@ -560,7 +562,24 @@ export function AdminPanelView({
   // Data Reset state
   const [resetConfirmInput, setResetConfirmInput] = useState('');
   const [resettingData, setResettingData] = useState(false);
+  const [resetElapsedSec, setResetElapsedSec] = useState(0);
+  const [resetProgressText, setResetProgressText] = useState('');
   const [resetFeedback, setResetFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!resettingData) {
+      setResetElapsedSec(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setResetElapsedSec(0);
+    const intervalId = window.setInterval(() => {
+      setResetElapsedSec(Math.max(1, Math.floor((Date.now() - startedAt) / 1000)));
+    }, 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [resettingData]);
 
   // Maintenance Mode state
   const [maintEnabledDraft, setMaintEnabledDraft] = useState<boolean>(
@@ -7582,9 +7601,12 @@ export function AdminPanelView({
                 if (resetConfirmInput.trim().toUpperCase() !== 'RESET') return;
                 onTabTap?.();
                 setResettingData(true);
+                setResetProgressText('Starting system data reset...');
                 setResetFeedback(null);
                 try {
-                  const res = await onExecuteDataReset();
+                  const res = await onExecuteDataReset((stage) => {
+                    setResetProgressText(stage);
+                  });
                   if (res.ok) {
                     setResetConfirmInput('');
                     setResetFeedback({
@@ -7603,6 +7625,7 @@ export function AdminPanelView({
                     text: err instanceof Error ? err.message : 'System data reset failed.',
                   });
                 } finally {
+                  setResetProgressText('');
                   setResettingData(false);
                 }
               }}
@@ -7625,6 +7648,18 @@ export function AdminPanelView({
                   className="clay-inset w-full min-h-[44px] px-3 text-sm font-mono-num font-extrabold uppercase text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-rose-400"
                 />
               </div>
+
+              {resettingData && (
+                <div className="rounded-xl border border-amber-200 dark:border-amber-800/60 bg-amber-50 dark:bg-amber-950/35 px-3 py-2.5 text-xs font-bold text-amber-800 dark:text-amber-300 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                    <span className="truncate">{resetProgressText || 'Resetting System Data...'}</span>
+                  </div>
+                  <span className="font-mono-num text-[11px] shrink-0 opacity-80">
+                    {resetElapsedSec}s
+                  </span>
+                </div>
+              )}
 
               {resetFeedback && (
                 <div
@@ -7650,7 +7685,10 @@ export function AdminPanelView({
                 {resettingData ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Resetting System Data...</span>
+                    <span>
+                      {resetProgressText || 'Resetting System Data...'}
+                      {resetElapsedSec > 0 ? ` (${resetElapsedSec}s)` : ''}
+                    </span>
                   </>
                 ) : (
                   <>

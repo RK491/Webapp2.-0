@@ -627,7 +627,7 @@ export function getChickenPack(breed: ChickenBreedId): ChickenPack {
 export const LEVEL_YIELD_BONUS_PER_LEVEL = 0.02;
 export const FEED_BOOSTER_COST_COINS = 400;
 export const FEED_BOOSTER_DURATION_MS = 60 * 60 * 1000; // 1 hour
-export const GOLDEN_EGG_COOLDOWN_MS = 45 * 1000; // 45 seconds
+export const GOLDEN_EGG_COOLDOWN_MS = 5 * 60 * 60 * 1000; // 5 hours
 export const GOLDEN_EGG_REWARD_COINS = 25;
 export const GOLDEN_EGG_REWARD_XP = 5;
 
@@ -2582,12 +2582,37 @@ export function applyAutoHarvestIfDue(
   return { profile: nextProfile, autoHarvestedEggs: harvestedEggs };
 }
 
+export function getGoldenEggCooldownRemainingMs(
+  profile: Pick<UserFarmProfile, 'lastGoldenEggAtMs'>,
+  nowMs: number,
+): number {
+  const last = Math.max(0, Number(profile.lastGoldenEggAtMs ?? 0) || 0);
+  if (last <= 0) return 0;
+  const elapsed = nowMs - last;
+  if (elapsed < 0) return GOLDEN_EGG_COOLDOWN_MS;
+  return Math.max(0, GOLDEN_EGG_COOLDOWN_MS - elapsed);
+}
+
+export function formatGoldenEggCooldownWait(remainingMs: number): string {
+  const safeMs = Math.max(1000, remainingMs);
+  const totalSecs = Math.ceil(safeMs / 1000);
+  const hours = Math.floor(totalSecs / 3600);
+  const mins = Math.floor((totalSecs % 3600) / 60);
+  const secs = totalSecs % 60;
+  if (hours > 0) {
+    return `${hours}h ${mins}m left`;
+  }
+  if (mins > 0) {
+    return `${mins}m ${secs}s left`;
+  }
+  return `${secs}s left`;
+}
+
 export function isGoldenEggReady(
   profile: Pick<UserFarmProfile, 'lastGoldenEggAtMs'>,
   nowMs: number,
 ): boolean {
-  const last = Number(profile.lastGoldenEggAtMs ?? 0);
-  return nowMs - last >= GOLDEN_EGG_COOLDOWN_MS;
+  return getGoldenEggCooldownRemainingMs(profile, nowMs) <= 0;
 }
 
 export function claimGoldenEggDrop(
@@ -2600,15 +2625,16 @@ export function claimGoldenEggDrop(
       bonusCoins: number;
       xpGained: number;
     }
-  | { error: string } {
+  | { error: string; remainingMs?: number } {
   if (calculateTotalChickens(profile) <= 0) {
     return { error: 'Buy at least 1 chicken first to start mining!' };
   }
-  if (!isGoldenEggReady(profile, nowMs)) {
-    const secsLeft = Math.ceil(
-      (GOLDEN_EGG_COOLDOWN_MS - (nowMs - Number(profile.lastGoldenEggAtMs ?? 0))) / 1000,
-    );
-    return { error: `Golden egg recharging (${Math.max(1, secsLeft)}s left).` };
+  const remainingMs = getGoldenEggCooldownRemainingMs(profile, nowMs);
+  if (remainingMs > 0) {
+    return {
+      error: `Golden egg recharging (${formatGoldenEggCooldownWait(remainingMs)}).`,
+      remainingMs,
+    };
   }
 
   const { level, xp } = addXp(profile.level, profile.xp, GOLDEN_EGG_REWARD_XP);
