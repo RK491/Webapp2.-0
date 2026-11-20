@@ -78,6 +78,8 @@ import {
   renderWithdrawApproveMessage,
   resolveMaintenanceConfig,
   resolveTaskPricingConfig,
+  shouldShowSignUpBonusClaim,
+  SIGNUP_BONUS_COINS,
   upgradeBasket,
   watchAdStep,
 } from './game/economy';
@@ -1399,17 +1401,23 @@ export default function App() {
           online: isOnlineRef.current,
         });
 
-        if (!skipWelcome && isNewPlayer) {
-          const seenKey = `chickenland_signup_bonus_seen_${activePlayerId}`;
-          let alreadySeen = false;
-          try {
-            alreadySeen = localStorage.getItem(seenKey) === '1';
-          } catch {
-            alreadySeen = false;
-          }
-          if (!alreadySeen) {
-            setShowSignUpBonusModal(true);
-          }
+        const seenKey = `chickenland_signup_bonus_seen_${activePlayerId}`;
+        let alreadySeen = false;
+        try {
+          alreadySeen = localStorage.getItem(seenKey) === '1';
+        } catch {
+          alreadySeen = false;
+        }
+        if (
+          shouldShowSignUpBonusClaim({
+            isNewPlayer,
+            alreadyClaimedInStorage: alreadySeen,
+            skipWelcome,
+            profile: resolvedProfile,
+            nowMs: Date.now(),
+          })
+        ) {
+          setShowSignUpBonusModal(true);
         }
 
         if (!skipWelcome && welcomeCheckedForPlayerRef.current !== activePlayerId) {
@@ -1648,13 +1656,17 @@ export default function App() {
       return;
     }
 
-    const sendLocalReferralDmFallback = async (referrerUid: string, coinsRewarded: number) => {
+    const sendLocalReferralDmFallback = async (
+      event: 'referral_pending' | 'referral_joined',
+      referrerUid: string,
+      coinsRewarded: number,
+    ) => {
       const localBot = getLocalAdminBotConfig();
       const numericReferrerId = extractTelegramNumericUserId(referrerUid);
       if (!localBot || !numericReferrerId) return;
       try {
         const msg = buildReferralBotNotificationMessage({
-          event: 'referral_joined',
+          event,
           referredName: currentProfile.displayName,
           referredHandle: currentProfile.handle,
           rewardCoins: coinsRewarded,
@@ -1775,6 +1787,7 @@ export default function App() {
             referredBonusCoins?: number;
             nextReferredCoins?: number;
             botDmSent?: boolean;
+            botDmEvent?: 'referral_pending' | 'referral_joined';
           } | null;
 
           console.log('[ReferralTrace] applyReferral:api_response', {
@@ -1786,6 +1799,8 @@ export default function App() {
             alreadyLinked: Boolean(payload?.alreadyLinked),
             reason: payload?.reason || null,
             referrerUid: payload?.referrerUid || null,
+            botDmSent: Boolean(payload?.botDmSent),
+            botDmEvent: payload?.botDmEvent || null,
           });
 
           if (!isStillSamePlayer()) {
@@ -1803,6 +1818,9 @@ export default function App() {
               const serverNextCoins = Number(payload.nextReferredCoins);
               const resolvedReferrer = payload.referrerUid || refCode;
               const isActivatedNow = Boolean(payload.activated ?? payload.referralActivated);
+              const dmEvent: 'referral_pending' | 'referral_joined' = isActivatedNow
+                ? 'referral_joined'
+                : 'referral_pending';
               setProfile((prev) => {
                 if (prev.uid !== targetUid || prev.referredBy) return prev;
                 const next: UserFarmProfile = {
@@ -1817,14 +1835,15 @@ export default function App() {
               });
               markReferralVerifiedLocally(resolvedReferrer, isActivatedNow);
               void syncDirectReferralRecord(resolvedReferrer, latestBefore);
-              if (isActivatedNow && !payload.botDmSent && payload.referrerUid) {
+              if (!payload.botDmSent && payload.referrerUid) {
                 void sendLocalReferralDmFallback(
+                  dmEvent,
                   payload.referrerUid,
                   Number(
                     payload.bonusAwarded ??
                       payload.coinsRewarded ??
                       REFERRER_SIGNUP_BONUS_COINS,
-                  ),
+                  ) || REFERRER_SIGNUP_BONUS_COINS,
                 );
               }
               triggerRewardConfetti();
@@ -1906,24 +1925,33 @@ export default function App() {
             showToast(
               `🎉 Referral Linked! +100 welcome coins unlocked via ${refRes.referrerName}!`,
             );
-            if (refRes.activated) {
-              const notifyPayload = await safeFetchJson<{ ok?: boolean; sent?: boolean }>('/api/referrals/notify', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  event: 'referral_joined',
-                  referrerUid: refRes.referrerUid,
-                  referredUid: refRes.profile.uid,
-                  referredName: refRes.profile.displayName,
-                  referredHandle: refRes.profile.handle,
-                  rewardCoins: refRes.coinsRewarded,
-                  initData: getTelegramInitData(),
-                  token: playerSessionTokenRef.current,
-                }),
-              });
-              if (!notifyPayload?.sent) {
-                await sendLocalReferralDmFallback(refRes.referrerUid, refRes.coinsRewarded);
-              }
+            const notifyEvent: 'referral_pending' | 'referral_joined' = refRes.activated
+              ? 'referral_joined'
+              : 'referral_pending';
+            const notifyRewardCoins = refRes.activated
+              ? refRes.coinsRewarded
+              : REFERRER_SIGNUP_BONUS_COINS;
+            const notifyPayload = await safeFetchJson<{ ok?: boolean; sent?: boolean }>('/api/referrals/notify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                event: notifyEvent,
+                referrerUid: refRes.referrerUid,
+                referredUid: refRes.profile.uid,
+                referredName: refRes.profile.displayName,
+                referredHandle: refRes.profile.handle,
+                rewardCoins: notifyRewardCoins,
+                initData: getTelegramInitData(),
+                token: playerSessionTokenRef.current,
+              }),
+            });
+            console.log('[ReferralTrace] applyReferral:firestore_notify_result', {
+              event: notifyEvent,
+              referrerUid: refRes.referrerUid,
+              sent: Boolean(notifyPayload?.sent),
+            });
+            if (!notifyPayload?.sent) {
+              await sendLocalReferralDmFallback(notifyEvent, refRes.referrerUid, notifyRewardCoins);
             }
             clearPendingRef('firestore_referral_linked');
             return;
@@ -2038,6 +2066,8 @@ export default function App() {
             referrerName?: string;
             referredBonusCoins?: number;
             nextReferredCoins?: number;
+            botDmSent?: boolean;
+            botDmEvent?: 'referral_pending' | 'referral_joined';
           } | null;
           console.log('[ReferralTrace] claimPending:response', {
             targetUid,
@@ -2047,6 +2077,8 @@ export default function App() {
             alreadyApplied: Boolean(payload?.alreadyApplied),
             reason: payload?.reason || null,
             referrerUid: payload?.referrerUid || null,
+            botDmSent: Boolean(payload?.botDmSent),
+            botDmEvent: payload?.botDmEvent || null,
           });
           if (!cancelled && payload?.ok && activePlayerIdRef.current === targetUid) {
             if (payload.applied || payload.alreadyApplied) {
@@ -2071,6 +2103,22 @@ export default function App() {
                 return next;
               });
               if (payload.applied) {
+                if (!payload.botDmSent && payload.referrerUid) {
+                  void safeFetchJson('/api/referrals/notify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      event: isActivatedNow ? 'referral_joined' : 'referral_pending',
+                      referrerUid: payload.referrerUid,
+                      referredUid: targetUid,
+                      referredName: latest.displayName,
+                      referredHandle: latest.handle,
+                      rewardCoins: REFERRER_SIGNUP_BONUS_COINS,
+                      initData: getTelegramInitData(),
+                      token: playerSessionTokenRef.current,
+                    }),
+                  });
+                }
                 triggerRewardConfetti();
                 playClaimSound(soundsEnabledRef.current);
                 triggerHapticFeedback('success');
@@ -2822,18 +2870,36 @@ export default function App() {
         activateReferral: res.shouldActivateReferral,
       });
       if (res.shouldActivateReferral && current.referredBy) {
-        void safeFetchJson('/api/referrals/activate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            referredUid: nextProfile.uid,
-            referrerUid: current.referredBy,
-            referredName: nextProfile.displayName,
-            referredHandle: nextProfile.handle,
-            initData: getTelegramInitData(),
-            token: playerSessionTokenRef.current,
-          }),
-        });
+        void (async () => {
+          const actRes = await safeFetchJson<{ ok?: boolean; botDmSent?: boolean }>('/api/referrals/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              referredUid: nextProfile.uid,
+              referrerUid: current.referredBy,
+              referredName: nextProfile.displayName,
+              referredHandle: nextProfile.handle,
+              initData: getTelegramInitData(),
+              token: playerSessionTokenRef.current,
+            }),
+          });
+          if (!actRes?.botDmSent) {
+            await safeFetchJson('/api/referrals/notify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                event: 'referral_joined',
+                referrerUid: current.referredBy,
+                referredUid: nextProfile.uid,
+                referredName: nextProfile.displayName,
+                referredHandle: nextProfile.handle,
+                rewardCoins: REFERRER_SIGNUP_BONUS_COINS,
+                initData: getTelegramInitData(),
+                token: playerSessionTokenRef.current,
+              }),
+            });
+          }
+        })();
         showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''} & unlocked +${REFERRER_SIGNUP_BONUS_COINS} referral bonus!`);
       } else {
         showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''}!`);
@@ -5141,7 +5207,7 @@ export default function App() {
 
   useEffect(() => {
     if (!maintenanceLoaded || maintenanceConfig.enabled) return;
-    if (isBanned || skipWelcome || showSplash) return;
+    if (isBanned || skipWelcome || showSplash || !isPlayerSynced || showSignUpBonusModal) return;
     if (subView === 'admin') return;
     if (startupAdTriggeredRef.current) return;
     startupAdTriggeredRef.current = true;
@@ -5171,9 +5237,11 @@ export default function App() {
   }, [
     adConfig,
     isBanned,
+    isPlayerSynced,
     maintenanceConfig.enabled,
     maintenanceLoaded,
     persistMutation,
+    showSignUpBonusModal,
     showSplash,
     skipWelcome,
     subView,
@@ -6391,15 +6459,20 @@ export default function App() {
 
       {!showSplash && !adModalState.open && showSignUpBonusModal && (
         <SignUpBonusModal
+          hasReferral={Boolean(profile.referredBy || pendingRefCode)}
           onClaim={() => {
             playClaimSound(soundsEnabled);
+            triggerRewardConfetti();
+            triggerHapticFeedback('success');
             setShowSignUpBonusModal(false);
             try {
               localStorage.setItem(`chickenland_signup_bonus_seen_${activePlayerId}`, '1');
             } catch {
               // ignore storage errors
             }
-            showToast('+1,000 coins ready! Buy your first chicken in Packs to start mining.');
+            showToast(
+              `+${SIGNUP_BONUS_COINS.toLocaleString()} coins claimed! Buy your first chicken in Packs to start mining.`,
+            );
           }}
         />
       )}

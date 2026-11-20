@@ -4160,7 +4160,7 @@ function escapeTelegramHtml(text: string): string {
 }
 
 export function buildReferralBotNotificationMessage(params: {
-  event: 'referral_joined' | 'deposit_commission';
+  event: 'referral_pending' | 'referral_joined' | 'deposit_commission';
   referredName?: string;
   referredHandle?: string;
   rewardCoins: number;
@@ -4205,6 +4205,22 @@ export function buildReferralBotNotificationMessage(params: {
     ].join('\n');
   }
 
+  if (params.event === 'referral_pending') {
+    const pendingReward = safeCoins > 0 ? safeCoins : REFERRER_SIGNUP_BONUS_COINS;
+    return [
+      '👋 <b>New Referral Received!</b>',
+      '',
+      `👤 <b>Referred User:</b> ${safeName} (${safeHandle})`,
+      '🔗 <b>Status:</b> Link Clicked (Joined Farm)',
+      `⏳ <b>Pending Reward:</b> +${pendingReward.toLocaleString()} Coins`,
+      `🎁 <b>Friend Welcome Bonus:</b> +${REFERRED_WELCOME_BONUS_COINS} Coins`,
+      '',
+      `🐔 <b>When You Receive Your Reward:</b> As soon as ${safeName} buys their <b>1st Chicken (Miner)</b>, your <b>+${pendingReward.toLocaleString()} Coins</b> referral reward will be automatically unlocked &amp; credited!`,
+      '',
+      `💎 Plus you earn a lifetime <b>${pct}% Deposit Share</b> &amp; <b>${eggPct}% Egg Share</b> once active!`,
+    ].join('\n');
+  }
+
   const nextCrate =
     totalRefs !== null
       ? REFERRAL_MILESTONE_CRATES.find((c) => totalRefs < c.targetActive) ||
@@ -4238,6 +4254,53 @@ export function buildReferralBotNotificationMessage(params: {
     `💎 <b>${pct}% Deposit &amp; ${eggPct}% Lifetime Egg Share:</b>`,
     `Whenever your referred user makes a deposit, you automatically receive a <b>${pct}% share</b> in Coins plus <b>${eggPct}% of their eggs</b>!`,
   ].join('\n');
+}
+
+export function shouldShowSignUpBonusClaim(params: {
+  isNewPlayer: boolean;
+  alreadyClaimedInStorage: boolean;
+  skipWelcome?: boolean;
+  nowMs?: number;
+  profile: Pick<
+    UserFarmProfile,
+    | 'createdAtMs'
+    | 'boughtThisWeek'
+    | 'totalEggsCollected'
+    | 'leghornCount'
+    | 'rhodeCount'
+    | 'orpingtonCount'
+    | 'australorpCount'
+    | 'watchedAdsCount'
+    | 'totalAdsWatched'
+    | 'completedTaskIds'
+    | 'claimedPromoCodes'
+  >;
+}): boolean {
+  if (params.skipWelcome || params.alreadyClaimedInStorage) {
+    return false;
+  }
+  if (params.isNewPlayer) {
+    return true;
+  }
+  const now = typeof params.nowMs === 'number' && Number.isFinite(params.nowMs) ? params.nowMs : Date.now();
+  const createdAtMs = Number(params.profile.createdAtMs ?? 0);
+  const ageMs = createdAtMs > 0 ? Math.max(0, now - createdAtMs) : Number.POSITIVE_INFINITY;
+  const isFreshAccount = ageMs <= 24 * 60 * 60 * 1000;
+  const totalChickens =
+    Number(params.profile.leghornCount ?? 0) +
+    Number(params.profile.rhodeCount ?? 0) +
+    Number(params.profile.orpingtonCount ?? 0) +
+    Number(params.profile.australorpCount ?? 0);
+  const hasNoProgress =
+    Number(params.profile.boughtThisWeek ?? 0) === 0 &&
+    totalChickens === 0 &&
+    Number(params.profile.totalEggsCollected ?? 0) === 0 &&
+    Number(params.profile.watchedAdsCount ?? 0) === 0 &&
+    Number(params.profile.totalAdsWatched ?? 0) === 0 &&
+    (params.profile.completedTaskIds?.length ?? 0) === 0 &&
+    (params.profile.claimedPromoCodes?.length ?? 0) === 0;
+
+  return isFreshAccount && hasNoProgress;
 }
 
 export const DEFAULT_WITHDRAW_APPROVE_MESSAGE_BODY = [

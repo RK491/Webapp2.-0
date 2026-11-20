@@ -137,6 +137,7 @@ import {
   recordCoopFeverAd,
   REQUIRED_TELEGRAM_CHANNELS,
   shouldRequireAdForAction,
+  shouldShowSignUpBonusClaim,
   SIGNUP_BONUS_COINS,
   sortTasks,
   summarizeReferrals,
@@ -2825,6 +2826,19 @@ test('referral reward is 150 coins, deposit commission is 5%, and bot notificati
   assert.ok(joinMsg.includes('Alex &lt;script&gt;'));
   assert.ok(joinMsg.includes('@alex_gram'));
 
+  const pendingMsg = buildReferralBotNotificationMessage({
+    event: 'referral_pending',
+    referredName: 'Alex <script>',
+    referredHandle: 'alex_gram',
+    rewardCoins: REFERRER_SIGNUP_BONUS_COINS,
+  });
+  assert.ok(pendingMsg.includes('New Referral Received'));
+  assert.ok(pendingMsg.includes('+150 Coins'));
+  assert.ok(pendingMsg.includes('1st Chicken (Miner)'));
+  assert.ok(pendingMsg.includes('+100 Coins'));
+  assert.ok(pendingMsg.includes('Alex &lt;script&gt;'));
+  assert.ok(pendingMsg.includes('@alex_gram'));
+
   const commissionMsg = buildReferralBotNotificationMessage({
     event: 'deposit_commission',
     referredName: 'Alex',
@@ -2837,6 +2851,85 @@ test('referral reward is 150 coins, deposit commission is 5%, and bot notificati
   assert.ok(commissionMsg.includes('+250 Coins'));
   assert.ok(commissionMsg.includes('0.4413 GRAM'));
   assert.ok(commissionMsg.includes('5%'));
+});
+
+test('full-screen 1,000 coins sign-up bonus shows for all new users (referral and non-referral) until claimed', () => {
+  const freshOrganic = createDefaultProfile('tg_1001', 'New User', '@newuser', NOW).profile;
+  assert.equal(
+    shouldShowSignUpBonusClaim({
+      isNewPlayer: true,
+      alreadyClaimedInStorage: false,
+      skipWelcome: false,
+      nowMs: NOW + 1000,
+      profile: freshOrganic,
+    }),
+    true,
+  );
+
+  // Even when /start <ref> pre-creates the Firestore player doc on server (isNewPlayer: false),
+  // a brand-new untouched referral account must still see the full-screen 1k claim screen
+  const freshReferredPreCreated = {
+    ...createDefaultProfile('tg_1002', 'Referred User', '@refuser', NOW).profile,
+    referredBy: 'tg_7508911853',
+  };
+  assert.equal(
+    shouldShowSignUpBonusClaim({
+      isNewPlayer: false,
+      alreadyClaimedInStorage: false,
+      skipWelcome: false,
+      nowMs: NOW + 30_000,
+      profile: freshReferredPreCreated,
+    }),
+    true,
+  );
+
+  // Hidden once claimed locally
+  assert.equal(
+    shouldShowSignUpBonusClaim({
+      isNewPlayer: true,
+      alreadyClaimedInStorage: true,
+      skipWelcome: false,
+      nowMs: NOW + 30_000,
+      profile: freshReferredPreCreated,
+    }),
+    false,
+  );
+
+  // Hidden when autostart=1 is used
+  assert.equal(
+    shouldShowSignUpBonusClaim({
+      isNewPlayer: true,
+      alreadyClaimedInStorage: false,
+      skipWelcome: true,
+      nowMs: NOW + 30_000,
+      profile: freshOrganic,
+    }),
+    false,
+  );
+
+  // Hidden for existing players who already own a hen or played earlier
+  assert.equal(
+    shouldShowSignUpBonusClaim({
+      isNewPlayer: false,
+      alreadyClaimedInStorage: false,
+      skipWelcome: false,
+      nowMs: NOW + 30_000,
+      profile: { ...freshReferredPreCreated, leghornCount: 1, boughtThisWeek: 1 },
+    }),
+    false,
+  );
+
+  // Hidden for accounts older than 24h even with zero localStorage
+  assert.equal(
+    shouldShowSignUpBonusClaim({
+      isNewPlayer: false,
+      alreadyClaimedInStorage: false,
+      skipWelcome: false,
+      nowMs: NOW + 25 * 60 * 60 * 1000,
+      profile: freshOrganic,
+    }),
+    false,
+  );
 });
 
 test('sequential ad network rotation serves primary site first, moves to next site on cooldown, and restores on expiry', () => {

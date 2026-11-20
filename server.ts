@@ -1800,6 +1800,7 @@ async function applyReferralInServerDb(params: {
   referredBonusCoins?: number;
   nextReferredCoins?: number;
   botDmSent?: boolean;
+  botDmEvent?: 'referral_pending' | 'referral_joined';
   botDmReason?: string;
   statusCode?: number;
 }> {
@@ -2157,27 +2158,31 @@ async function applyReferralInServerDb(params: {
 
     saveReferral(referredUid, referrerUid);
 
-    let botDmSent = false;
-    let botDmReason: string | undefined;
-    if (activatedOnLink) {
-      const dmResult = await sendReferrerJoinedBotDm({
-        referrerUid,
-        referredUid,
-        referredName: safeReferredName,
-        referredHandle: safeReferredHandle,
-        rewardCoins,
-        totalReferrals: referrerTotalReferrals,
-        totalReferralCoins: referrerTotalCoinsEarned,
-      });
-      botDmSent = dmResult.sent;
-      botDmReason = dmResult.reason;
-    }
+    const botDmEvent: 'referral_pending' | 'referral_joined' = activatedOnLink
+      ? 'referral_joined'
+      : 'referral_pending';
+    const dmResult = await sendReferrerJoinedBotDm({
+      event: botDmEvent,
+      referrerUid,
+      referredUid,
+      referredName: safeReferredName,
+      referredHandle: safeReferredHandle,
+      rewardCoins,
+      ...(activatedOnLink
+        ? {
+            totalReferrals: referrerTotalReferrals,
+            totalReferralCoins: referrerTotalCoinsEarned,
+          }
+        : {}),
+    });
+    const botDmSent = dmResult.sent;
+    const botDmReason = dmResult.reason;
 
     recordServerLog(
       'info',
       'referral_apply',
       `Referral linked: ${referredUid} -> ${referrerUid} (${activatedOnLink ? `activated +${rewardCoins}c` : 'pending 1st hen'})`,
-      activatedOnLink ? `botDmSent=${botDmSent}${botDmReason ? ` (${botDmReason})` : ''}` : undefined,
+      `botDmEvent=${botDmEvent} botDmSent=${botDmSent}${botDmReason ? ` (${botDmReason})` : ''}`,
     );
 
     return {
@@ -2192,6 +2197,7 @@ async function applyReferralInServerDb(params: {
       referredBonusCoins: REFERRED_WELCOME_BONUS_COINS,
       nextReferredCoins,
       botDmSent,
+      botDmEvent,
       ...(botDmReason ? { botDmReason } : {}),
     };
   } catch (err) {
@@ -2214,6 +2220,7 @@ async function applyReferralInServerDb(params: {
 }
 
 async function sendReferrerJoinedBotDm(params: {
+  event?: 'referral_pending' | 'referral_joined';
   referrerUid: string;
   referredUid: string;
   referredName: string;
@@ -2231,14 +2238,16 @@ async function sendReferrerJoinedBotDm(params: {
     return { sent: false, reason: 'Referrer has no numeric Telegram chat ID' };
   }
 
-  const dedupKey = `referral_joined:${params.referrerUid}:${params.referredUid}`;
+  const event: 'referral_pending' | 'referral_joined' =
+    params.event === 'referral_pending' ? 'referral_pending' : 'referral_joined';
+  const dedupKey = `${event}:${params.referrerUid}:${params.referredUid}`;
   const prevSentAt = referralNotifyDedup.get(dedupKey);
   if (prevSentAt && Date.now() - prevSentAt < 60_000) {
     return { sent: false, reason: 'Duplicate notification suppressed' };
   }
 
   const messageText = buildReferralBotNotificationMessage({
-    event: 'referral_joined',
+    event,
     referredName: params.referredName,
     referredHandle: params.referredHandle,
     rewardCoins: params.rewardCoins,
@@ -5768,6 +5777,7 @@ async function startServer() {
         referrerUid: result.referrerUid,
         referrerName: result.referrerName,
         botDmSent: result.botDmSent,
+        botDmEvent: result.botDmEvent,
       });
       return;
     }
@@ -6039,6 +6049,8 @@ async function startServer() {
           coinsRewarded: result.coinsRewarded ?? 0,
           referredBonusCoins: result.referredBonusCoins ?? REFERRED_WELCOME_BONUS_COINS,
           nextReferredCoins: result.nextReferredCoins,
+          botDmSent: result.botDmSent,
+          botDmEvent: result.botDmEvent,
         });
         return;
       }
@@ -6121,7 +6133,7 @@ async function startServer() {
     }
 
     const body = req.body as {
-      event?: 'referral_joined' | 'deposit_commission';
+      event?: 'referral_pending' | 'referral_joined' | 'deposit_commission';
       referrerUid?: string;
       referredUid?: string;
       referredName?: string;
@@ -6136,9 +6148,14 @@ async function startServer() {
     const referrerUid = String(body.referrerUid || '').trim();
     const referredUid = String(body.referredUid || '').trim();
     const numericReferrerId = extractTelegramNumericUserId(referrerUid);
-    const event = body.event === 'deposit_commission' ? 'deposit_commission' : 'referral_joined';
+    const event =
+      body.event === 'deposit_commission'
+        ? 'deposit_commission'
+        : body.event === 'referral_pending'
+          ? 'referral_pending'
+          : 'referral_joined';
     const rewardCoins =
-      event === 'referral_joined'
+      event === 'referral_joined' || event === 'referral_pending'
         ? REFERRER_SIGNUP_BONUS_COINS
         : Math.min(10_000, Math.max(0, Math.round(Number(body.rewardCoins ?? 0))));
 
